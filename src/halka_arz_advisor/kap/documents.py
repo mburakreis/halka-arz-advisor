@@ -275,3 +275,52 @@ def aggregate_company_financial_series(disclosures: list[KapDisclosure]) -> dict
             continue
         by_record.setdefault(disclosure.matched_spk_record_id, []).extend(disclosure.financial_observations)
     return {record_id: tuple(observations) for record_id, observations in by_record.items()}
+
+
+# Document types whose own companyTitle reliably names the *subject*
+# company itself — checked in this order when picking a company_name to
+# show a user. Deliberately excludes:
+# - "trading_start" ("İşlem Görmeye Başlama"): confirmed against real
+#   KAP data that this notice type is filed under Borsa İstanbul's own
+#   name ("BORSA İSTANBUL A.Ş."), not the company that just started
+#   trading.
+# - "price_determination_report"/"ipo_results" ("Fiyat Tespit Raporu"/
+#   "Halka Arz Sonuçları"): per this project's own established finding
+#   (see kap.models._extract_ticker's docstring), these are typically
+#   filed by the IPO's intermediary brokerage under its *own* KAP
+#   membership — companyTitle names the broker, not the issuer.
+# Picking any of these first would display the wrong entity's name (and,
+# via halka_arz_advisor.decision.audit.CompanyDecisionInputs.sector,
+# which applies this identical priority list, would also misclassify
+# that company's sector).
+_COMPANY_NAME_SOURCE_PRIORITY: tuple[str, ...] = (
+    "approved_prospectus",
+    "investor_sale_announcement",
+)
+
+
+def infer_company_name_and_ticker(record_id: str, disclosures: list[KapDisclosure]) -> tuple[str, str | None]:
+    """The best available ``(company_name, ticker)`` pair for one
+    matched company, from any of its disclosures — ticker from the
+    first disclosure that has one (KAP resolves this reliably
+    regardless of document type, see
+    :func:`~halka_arz_advisor.kap.models._extract_ticker`); company_name
+    preferring a disclosure the subject company filed itself (see
+    :data:`_COMPANY_NAME_SOURCE_PRIORITY`) over any other, since not
+    every document type's own companyTitle names the subject company.
+    """
+    ticker = next((d.ticker for d in disclosures if d.ticker), None)
+
+    company_name = None
+    for document_type in _COMPANY_NAME_SOURCE_PRIORITY:
+        company_name = next(
+            (d.company_name for d in disclosures if d.document_type == document_type and d.company_name), None
+        )
+        if company_name:
+            break
+    if not company_name:
+        company_name = next((d.company_name for d in disclosures if d.company_name), None)
+    if not company_name:
+        company_name = record_id
+
+    return company_name, ticker

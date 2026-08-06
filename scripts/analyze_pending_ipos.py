@@ -40,6 +40,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from halka_arz_advisor.decision.pipeline import compute_decision_results  # noqa: E402
 from halka_arz_advisor.gemini.analysis import analyze_company, verify_gemini_ready  # noqa: E402
 from halka_arz_advisor.gemini.cache import AnalysisCache  # noqa: E402
 from halka_arz_advisor.gemini.client import GeminiClient  # noqa: E402
@@ -48,7 +49,12 @@ from halka_arz_advisor.gemini.exceptions import GeminiError, GeminiUnavailableEr
 from halka_arz_advisor.gemini.models import AnalysisRecord  # noqa: E402
 from halka_arz_advisor.kap.classification import target_document_types  # noqa: E402
 from halka_arz_advisor.kap.client import KapClient  # noqa: E402
-from halka_arz_advisor.kap.documents import DEFAULT_CACHE_DIR, aggregate_company_facts, process_disclosure_documents  # noqa: E402
+from halka_arz_advisor.kap.documents import (  # noqa: E402
+    DEFAULT_CACHE_DIR,
+    aggregate_company_facts,
+    infer_company_name_and_ticker,
+    process_disclosure_documents,
+)
 from halka_arz_advisor.kap.exceptions import KapApiError  # noqa: E402
 from halka_arz_advisor.kap.matching import match_disclosure  # noqa: E402
 from halka_arz_advisor.kap.models import KapDisclosure  # noqa: E402
@@ -88,17 +94,8 @@ def _matches_ticker_filter(disclosure: KapDisclosure, ticker_filter: str) -> boo
         return True
     return wanted in disclosure.company_name.upper()
 
-
-def _infer_company_name_and_ticker(record_id: str, disclosures: list[KapDisclosure]) -> tuple[str, str | None]:
-    for d in disclosures:
-        if d.ticker:
-            return d.company_name, d.ticker
-    company_name = disclosures[0].company_name if disclosures else record_id
-    ticker = record_id.split(":")[1] if record_id.startswith("ipo:") else None
-    return company_name, ticker
-
-
 def _record_to_json(record: AnalysisRecord) -> dict:
+    decision = record.decision_result
     return {
         "spk_record_id": record.spk_record_id,
         "llm_status": record.llm_status,
@@ -106,6 +103,15 @@ def _record_to_json(record: AnalysisRecord) -> dict:
         "llm_analysis": record.llm_analysis.as_dict() if record.llm_analysis is not None else None,
         "llm_warnings": list(record.llm_warnings),
         "analyzed_at": record.analyzed_at.isoformat(),
+        "decision": {
+            "signal": decision.signal,
+            "total_score": decision.total_score,
+            "confidence_score": decision.confidence_score,
+            "rule_version": decision.rule_version,
+            "weight_set_version": decision.weight_set_version,
+        }
+        if decision is not None
+        else None,
     }
 
 
@@ -170,12 +176,24 @@ def main(argv: list[str] | None = None) -> int:
         if d.matched_spk_record_id:
             disclosures_by_record.setdefault(d.matched_spk_record_id, []).append(d)
 
-    if not company_facts:
+    # The deterministic decision is computed once here, from exactly the
+    # same cached data every analysis below explains — see
+    # halka_arz_advisor.decision.pipeline's module docstring for why this
+    # must be the *same* computation scripts/send_pending_analyses.py
+    # later performs (their cache-key derivations must agree).
+    decision_results = compute_decision_results(processed, ipo_records=tuple(ipo_records), application_records=tuple(application_records))
+
+    # Only companies with both real ExtractedFacts *and* a computed
+    # decision are analyzable — a company with disclosures but no
+    # readable document (all scanned, no digital text) has neither.
+    analyzable_record_ids = sorted(set(company_facts) & set(decision_results))
+
+    if not analyzable_record_ids:
         print("No companies with cached, matched documents to analyze.", file=sys.stderr)
         print(json.dumps([], indent=2))
         return 0
 
-    print(f"{len(company_facts)} compan(y/ies) with cached documents ready for analysis", file=sys.stderr)
+    print(f"{len(analyzable_record_ids)} compan(y/ies) with cached documents ready for analysis", file=sys.stderr)
 
     print("Checking Gemini availability and configured model...", file=sys.stderr)
     gemini_client = GeminiClient(gemini_config)
@@ -193,8 +211,9 @@ def main(argv: list[str] | None = None) -> int:
                 llm_analysis=None,
                 llm_warnings=(str(exc),),
                 analyzed_at=now,
+                decision_result=decision_results[record_id],
             )
-            for record_id in company_facts
+            for record_id in analyzable_record_ids
         ]
         print(json.dumps([_record_to_json(r) for r in records], indent=2, ensure_ascii=False))
         return 1
@@ -202,9 +221,10 @@ def main(argv: list[str] | None = None) -> int:
     analysis_cache = AnalysisCache(args.analysis_cache_dir)
     results: list[AnalysisRecord] = []
     skipped_transient = 0
-    for record_id, facts in company_facts.items():
+    for record_id in analyzable_record_ids:
+        facts = company_facts[record_id]
         disclosures_for_company = disclosures_by_record.get(record_id, [])
-        company_name, ticker = _infer_company_name_and_ticker(record_id, disclosures_for_company)
+        company_name, ticker = infer_company_name_and_ticker(record_id, disclosures_for_company)
         print(f"Analyzing {record_id} ({company_name})...", file=sys.stderr)
         try:
             record = analyze_company(
@@ -216,6 +236,7 @@ def main(argv: list[str] | None = None) -> int:
                 pdf_cache=pdf_cache,
                 analysis_cache=analysis_cache,
                 gemini_client=gemini_client,
+                decision_result=decision_results[record_id],
                 ocr_cache=ocr_cache,
             )
         except GeminiUnavailableError as exc:

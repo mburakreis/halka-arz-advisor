@@ -561,3 +561,55 @@ def evaluate_decision(snapshot: DecisionSnapshot, *, config_version: str = "expe
         rule_version=config.rule_version,
         weight_set_version=config.version,
     )
+
+
+# --------------------------------------------------------------------------
+# Reporting helpers — shared by scripts/validate_decision_engine.py and
+# notify.analysis_formatting's Telegram rendering, so "top contributions"
+# means exactly the same thing in both places.
+# --------------------------------------------------------------------------
+
+
+def top_positive_contributions(result: DecisionResult, limit: int = 3) -> tuple[FeatureContribution, ...]:
+    scored = [c for c in result.feature_contributions if c.included_in_score and c.normalized_score is not None]
+    return tuple(sorted(scored, key=lambda c: c.normalized_score, reverse=True)[:limit])
+
+
+def top_negative_contributions(result: DecisionResult, limit: int = 3) -> tuple[FeatureContribution, ...]:
+    scored = [c for c in result.feature_contributions if c.included_in_score and c.normalized_score is not None]
+    return tuple(sorted(scored, key=lambda c: c.normalized_score)[:limit])
+
+
+def unavailable_high_weight_features(result: DecisionResult, weight_threshold: float = 15.0) -> tuple[FeatureContribution, ...]:
+    """Features that *would* meaningfully move a category score
+    (weight at or above ``weight_threshold``) but weren't available to
+    score — excludes ``NOT_APPLICABLE`` (a sector-correct non-gap, not
+    something worth flagging as missing)."""
+    return tuple(
+        c
+        for c in result.feature_contributions
+        if not c.included_in_score and c.status != "NOT_APPLICABLE" and c.weight >= weight_threshold
+    )
+
+
+def decision_signature(result: DecisionResult) -> dict:
+    """A JSON-safe, time-stable summary of ``result`` — deliberately
+    excludes ``confidence_score``/``confidence_components``, since the
+    ``document_freshness`` component drifts with wall-clock time alone
+    (see :func:`_document_freshness`). Callers that hash this to decide
+    "did the decision materially change" (the Gemini analysis cache key
+    in :mod:`halka_arz_advisor.gemini.analysis`, the Telegram dedup hash
+    in :mod:`halka_arz_advisor.notify.analysis_identity`) would
+    otherwise treat routine same-day freshness decay as a change and
+    re-analyze/re-send for no real reason."""
+    return {
+        "signal": result.signal,
+        "total_score": result.total_score,
+        "category_scores": [
+            {"category": c.category, "score": c.score, "coverage": round(c.coverage, 6), "status": c.status}
+            for c in result.category_scores
+        ],
+        "hard_rules": [{"rule_id": r.rule_id, "triggered": r.triggered} for r in result.hard_rules],
+        "rule_version": result.rule_version,
+        "weight_set_version": result.weight_set_version,
+    }

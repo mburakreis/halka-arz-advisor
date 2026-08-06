@@ -1,11 +1,13 @@
 from dataclasses import replace
 from datetime import UTC, datetime
 
+from halka_arz_advisor.decision.engine import DecisionResult
 from halka_arz_advisor.gemini.analysis import compute_document_content_hash
 from halka_arz_advisor.gemini.cache import AnalysisCache, compute_cache_key
 from halka_arz_advisor.gemini.context import select_context_sections
 from halka_arz_advisor.gemini.models import AnalysisRecord
-from halka_arz_advisor.gemini.schema import AnalysisOutput, SourceReference
+from halka_arz_advisor.gemini.prompt import PROMPT_VERSION
+from halka_arz_advisor.gemini.schema import SCHEMA_VERSION, AnalysisOutput, SourceReference
 from halka_arz_advisor.kap.attachments import KapAttachment
 from halka_arz_advisor.kap.extraction import build_extracted_facts
 from halka_arz_advisor.kap.models import KapDisclosure
@@ -15,9 +17,32 @@ from halka_arz_advisor.notify.analysis_identity import analysis_notification_has
 from halka_arz_advisor.notify.analysis_state import SentAnalysesState, load_state, save_state
 from halka_arz_advisor.notify.telegram import TelegramSendError
 
+# Real production versions — must match exactly what
+# halka_arz_advisor.gemini.analysis.lookup_analysis derives its cache
+# key from internally (it always imports these itself, not whatever a
+# caller happens to pass to deliver_pending_analyses's own
+# prompt_version= parameter, which only feeds the *notification dedup*
+# hash, a separate concern — see analysis_notification_hash).
 MODEL = "gemini-3.5-flash"
-PROMPT_VERSION = "1"
 RECORD_ID = "ipo:QUICK:2026 / 7"
+
+
+def _decision_result(**overrides) -> DecisionResult:
+    defaults = dict(
+        signal="participate",
+        total_score=70.0,
+        confidence_score=75.0,
+        category_scores=(),
+        feature_contributions=(),
+        confidence_components=(),
+        hard_rules=(),
+        warnings=(),
+        evidence_references=(),
+        rule_version="expert_v0",
+        weight_set_version="expert_v0",
+    )
+    defaults.update(overrides)
+    return DecisionResult(**defaults)
 
 
 def _attachment(obj_id: str) -> KapAttachment:
@@ -61,25 +86,25 @@ def _analysis(**overrides) -> AnalysisOutput:
         negative_factors=(),
         missing_information=(),
         data_conflicts=(),
-        participation_signal="participate",
-        participation_rationale="Gerekçe.",
-        confidence=0.8,
+        decision_explanation="Gerekçe.",
         source_references=(SourceReference("d1", 1),),
     )
     defaults.update(overrides)
     return AnalysisOutput(**defaults)
 
 
-def _seed_completed_analysis(*, pdf_cache: PdfCache, analysis_cache: AnalysisCache, disclosures, facts, analysis: AnalysisOutput) -> AnalysisRecord:
+def _seed_completed_analysis(
+    *, pdf_cache: PdfCache, analysis_cache: AnalysisCache, disclosures, facts, analysis: AnalysisOutput, decision_result: DecisionResult
+) -> AnalysisRecord:
     """Write a 'completed' record to analysis_cache under exactly the
-    cache key lookup_analysis() would derive for this facts/disclosures
-    combination — mirrors what analyze_company() itself would have
-    written."""
+    cache key lookup_analysis() would derive for this facts/disclosures/
+    decision_result combination — mirrors what analyze_company() itself
+    would have written."""
     sections = select_context_sections(disclosures, pdf_cache)
     assert sections, "test setup must produce at least one context section"
-    content_hash = compute_document_content_hash(facts=facts, sections=sections)
+    content_hash = compute_document_content_hash(facts=facts, sections=sections, decision_result=decision_result)
     cache_key = compute_cache_key(
-        document_content_hash=content_hash, model_name=MODEL, prompt_version=PROMPT_VERSION, schema_version="1"
+        document_content_hash=content_hash, model_name=MODEL, prompt_version=PROMPT_VERSION, schema_version=SCHEMA_VERSION
     )
     record = AnalysisRecord(
         spk_record_id=RECORD_ID,
@@ -88,9 +113,10 @@ def _seed_completed_analysis(*, pdf_cache: PdfCache, analysis_cache: AnalysisCac
         llm_analysis=analysis,
         llm_warnings=(),
         analyzed_at=datetime(2026, 8, 6, tzinfo=UTC),
+        decision_result=decision_result,
         document_content_hash=content_hash,
         prompt_version=PROMPT_VERSION,
-        schema_version="1",
+        schema_version=SCHEMA_VERSION,
     )
     analysis_cache.put(cache_key, record)
     return record
@@ -125,8 +151,12 @@ def test_completed_analysis_is_delivered_and_marked_sent(build_pdf_bytes, tmp_pa
     pdf_cache.put("obj-1", build_pdf_bytes(text="Halka arz talep toplama ile ilgili bilgiler bu sayfada yer almaktadir"))
     disclosures = [_disclosure(disclosure_id="d1", obj_id="obj-1")]
     facts = _facts_not_found()
+    decision_result = _decision_result()
     analysis_cache = AnalysisCache(tmp_path / "analysis")
-    _seed_completed_analysis(pdf_cache=pdf_cache, analysis_cache=analysis_cache, disclosures=disclosures, facts=facts, analysis=_analysis())
+    _seed_completed_analysis(
+        pdf_cache=pdf_cache, analysis_cache=analysis_cache, disclosures=disclosures, facts=facts, analysis=_analysis(),
+        decision_result=decision_result,
+    )
 
     state = SentAnalysesState()
     sender = _RecordingSender()
@@ -134,6 +164,7 @@ def test_completed_analysis_is_delivered_and_marked_sent(build_pdf_bytes, tmp_pa
     result = deliver_pending_analyses(
         company_facts={RECORD_ID: facts},
         disclosures_by_record={RECORD_ID: disclosures},
+        decision_results={RECORD_ID: decision_result},
         pdf_cache=pdf_cache,
         analysis_cache=analysis_cache,
         model=MODEL,
@@ -150,7 +181,9 @@ def test_completed_analysis_is_delivered_and_marked_sent(build_pdf_bytes, tmp_pa
 
 
 # --------------------------------------------------------------------------
-# insufficient-data delivery
+# insufficient-data / invalid-output delivery — both now deliverable via
+# the deterministic fallback, since decision_result is always the source
+# of truth regardless of Gemini's own status.
 # --------------------------------------------------------------------------
 
 
@@ -159,6 +192,7 @@ def test_insufficient_data_analysis_is_delivered(build_pdf_bytes, tmp_path):
     pdf_cache.put("obj-1", build_pdf_bytes(with_image=True))  # scanned -> no extractable text
     disclosures = [_disclosure(disclosure_id="d1", obj_id="obj-1")]
     facts = _facts_not_found()
+    decision_result = _decision_result()
     analysis_cache = AnalysisCache(tmp_path / "analysis")
 
     state = SentAnalysesState()
@@ -167,6 +201,7 @@ def test_insufficient_data_analysis_is_delivered(build_pdf_bytes, tmp_path):
     result = deliver_pending_analyses(
         company_facts={RECORD_ID: facts},
         disclosures_by_record={RECORD_ID: disclosures},
+        decision_results={RECORD_ID: decision_result},
         pdf_cache=pdf_cache,
         analysis_cache=analysis_cache,
         model=MODEL,
@@ -177,39 +212,45 @@ def test_insufficient_data_analysis_is_delivered(build_pdf_bytes, tmp_path):
     )
 
     assert result.sent_record_ids == [RECORD_ID]
-    assert "Yetersiz veri" in sender.messages[0]
+    assert "Katıl" in sender.messages[0]  # from decision_result, not Gemini
 
 
-def test_invalid_output_status_is_not_delivered(build_pdf_bytes, tmp_path):
+def test_invalid_output_status_is_still_delivered_via_deterministic_fallback(build_pdf_bytes, tmp_path):
+    """Gemini's narrative failed validation, but the deterministic
+    decision_result is unaffected by that — the message still goes out,
+    explained by halka_arz_advisor.decision.explain.format_explanation
+    instead of Gemini's (missing) narrative."""
     pdf_cache = PdfCache(tmp_path / "pdfs")
     pdf_cache.put("obj-1", build_pdf_bytes(text="Halka arz talep toplama ile ilgili bilgiler bu sayfada yer almaktadir"))
     disclosures = [_disclosure(disclosure_id="d1", obj_id="obj-1")]
     facts = _facts_not_found()
+    decision_result = _decision_result()
     analysis_cache = AnalysisCache(tmp_path / "analysis")
 
     sections = select_context_sections(disclosures, pdf_cache)
-    content_hash = compute_document_content_hash(facts=facts, sections=sections)
-    cache_key = compute_cache_key(document_content_hash=content_hash, model_name=MODEL, prompt_version=PROMPT_VERSION, schema_version="1")
+    content_hash = compute_document_content_hash(facts=facts, sections=sections, decision_result=decision_result)
+    cache_key = compute_cache_key(document_content_hash=content_hash, model_name=MODEL, prompt_version=PROMPT_VERSION, schema_version=SCHEMA_VERSION)
     analysis_cache.put(
         cache_key,
         AnalysisRecord(
             spk_record_id=RECORD_ID, llm_status="invalid_output", llm_model=MODEL, llm_analysis=None,
-            llm_warnings=("bad json",), analyzed_at=datetime(2026, 8, 6, tzinfo=UTC),
-            document_content_hash=content_hash, prompt_version=PROMPT_VERSION, schema_version="1",
+            llm_warnings=("bad json",), analyzed_at=datetime(2026, 8, 6, tzinfo=UTC), decision_result=decision_result,
+            document_content_hash=content_hash, prompt_version=PROMPT_VERSION, schema_version=SCHEMA_VERSION,
         ),
     )
 
     state = SentAnalysesState()
     sender = _RecordingSender()
     result = deliver_pending_analyses(
-        company_facts={RECORD_ID: facts}, disclosures_by_record={RECORD_ID: disclosures}, pdf_cache=pdf_cache,
+        company_facts={RECORD_ID: facts}, disclosures_by_record={RECORD_ID: disclosures},
+        decision_results={RECORD_ID: decision_result}, pdf_cache=pdf_cache,
         analysis_cache=analysis_cache, model=MODEL, prompt_version=PROMPT_VERSION, state=state,
         infer_company_name_and_ticker=_infer_company_name_and_ticker, sender=sender,
     )
 
-    assert result.sent_record_ids == []
-    assert result.skipped_no_analysis_record_ids == [RECORD_ID]
-    assert sender.messages == []
+    assert result.sent_record_ids == [RECORD_ID]
+    assert len(sender.messages) == 1
+    assert "Katıl" in sender.messages[0]
 
 
 def test_no_cached_analysis_yet_is_skipped(build_pdf_bytes, tmp_path):
@@ -217,17 +258,40 @@ def test_no_cached_analysis_yet_is_skipped(build_pdf_bytes, tmp_path):
     pdf_cache.put("obj-1", build_pdf_bytes(text="Halka arz talep toplama ile ilgili bilgiler bu sayfada yer almaktadir"))
     disclosures = [_disclosure(disclosure_id="d1", obj_id="obj-1")]
     facts = _facts_not_found()
+    decision_result = _decision_result()
     analysis_cache = AnalysisCache(tmp_path / "analysis")  # nothing ever written to it
 
     state = SentAnalysesState()
     sender = _RecordingSender()
     result = deliver_pending_analyses(
-        company_facts={RECORD_ID: facts}, disclosures_by_record={RECORD_ID: disclosures}, pdf_cache=pdf_cache,
+        company_facts={RECORD_ID: facts}, disclosures_by_record={RECORD_ID: disclosures},
+        decision_results={RECORD_ID: decision_result}, pdf_cache=pdf_cache,
         analysis_cache=analysis_cache, model=MODEL, prompt_version=PROMPT_VERSION, state=state,
         infer_company_name_and_ticker=_infer_company_name_and_ticker, sender=sender,
     )
 
     assert result.skipped_no_analysis_record_ids == [RECORD_ID]
+    assert sender.messages == []
+
+
+def test_company_with_no_decision_result_is_skipped(build_pdf_bytes, tmp_path):
+    """A company absent from decision_results (no matched KAP/SPK data
+    at all) is skipped, even if it somehow has cached facts."""
+    pdf_cache = PdfCache(tmp_path / "pdfs")
+    disclosures: list[KapDisclosure] = []
+    facts = _facts_not_found()
+    analysis_cache = AnalysisCache(tmp_path / "analysis")
+
+    state = SentAnalysesState()
+    sender = _RecordingSender()
+    result = deliver_pending_analyses(
+        company_facts={RECORD_ID: facts}, disclosures_by_record={RECORD_ID: disclosures},
+        decision_results={}, pdf_cache=pdf_cache,
+        analysis_cache=analysis_cache, model=MODEL, prompt_version=PROMPT_VERSION, state=state,
+        infer_company_name_and_ticker=_infer_company_name_and_ticker, sender=sender,
+    )
+
+    assert result.sent_record_ids == []
     assert sender.messages == []
 
 
@@ -241,8 +305,12 @@ def test_already_sent_unchanged_analysis_is_not_resent(build_pdf_bytes, tmp_path
     pdf_cache.put("obj-1", build_pdf_bytes(text="Halka arz talep toplama ile ilgili bilgiler bu sayfada yer almaktadir"))
     disclosures = [_disclosure(disclosure_id="d1", obj_id="obj-1")]
     facts = _facts_not_found()
+    decision_result = _decision_result()
     analysis_cache = AnalysisCache(tmp_path / "analysis")
-    record = _seed_completed_analysis(pdf_cache=pdf_cache, analysis_cache=analysis_cache, disclosures=disclosures, facts=facts, analysis=_analysis())
+    record = _seed_completed_analysis(
+        pdf_cache=pdf_cache, analysis_cache=analysis_cache, disclosures=disclosures, facts=facts, analysis=_analysis(),
+        decision_result=decision_result,
+    )
 
     already_sent_hash = analysis_notification_hash(
         spk_record_id=RECORD_ID, ticker="QUICK", model=MODEL, prompt_version=PROMPT_VERSION, record=record
@@ -251,7 +319,8 @@ def test_already_sent_unchanged_analysis_is_not_resent(build_pdf_bytes, tmp_path
     sender = _RecordingSender()
 
     result = deliver_pending_analyses(
-        company_facts={RECORD_ID: facts}, disclosures_by_record={RECORD_ID: disclosures}, pdf_cache=pdf_cache,
+        company_facts={RECORD_ID: facts}, disclosures_by_record={RECORD_ID: disclosures},
+        decision_results={RECORD_ID: decision_result}, pdf_cache=pdf_cache,
         analysis_cache=analysis_cache, model=MODEL, prompt_version=PROMPT_VERSION, state=state,
         infer_company_name_and_ticker=_infer_company_name_and_ticker, sender=sender,
     )
@@ -266,12 +335,16 @@ def test_changed_analysis_content_is_resent(build_pdf_bytes, tmp_path):
     pdf_cache.put("obj-1", build_pdf_bytes(text="Halka arz talep toplama ile ilgili bilgiler bu sayfada yer almaktadir"))
     disclosures = [_disclosure(disclosure_id="d1", obj_id="obj-1")]
     facts = _facts_not_found()
+    decision_result = _decision_result()
     analysis_cache = AnalysisCache(tmp_path / "analysis")
-    record = _seed_completed_analysis(pdf_cache=pdf_cache, analysis_cache=analysis_cache, disclosures=disclosures, facts=facts, analysis=_analysis())
+    record = _seed_completed_analysis(
+        pdf_cache=pdf_cache, analysis_cache=analysis_cache, disclosures=disclosures, facts=facts, analysis=_analysis(),
+        decision_result=decision_result,
+    )
 
     # A hash computed from a *different* (older) analysis content for the
     # same company is already in the sent-state...
-    older_variant = replace(record, llm_analysis=_analysis(participation_rationale="Eski gerekçe."))
+    older_variant = replace(record, llm_analysis=_analysis(decision_explanation="Eski gerekçe."))
     stale_hash = analysis_notification_hash(
         spk_record_id=RECORD_ID, ticker="QUICK", model=MODEL, prompt_version=PROMPT_VERSION, record=older_variant
     )
@@ -281,7 +354,8 @@ def test_changed_analysis_content_is_resent(build_pdf_bytes, tmp_path):
     # ...but the currently cached analysis has different content, so its
     # hash differs from stale_hash -> must be resent.
     result = deliver_pending_analyses(
-        company_facts={RECORD_ID: facts}, disclosures_by_record={RECORD_ID: disclosures}, pdf_cache=pdf_cache,
+        company_facts={RECORD_ID: facts}, disclosures_by_record={RECORD_ID: disclosures},
+        decision_results={RECORD_ID: decision_result}, pdf_cache=pdf_cache,
         analysis_cache=analysis_cache, model=MODEL, prompt_version=PROMPT_VERSION, state=state,
         infer_company_name_and_ticker=_infer_company_name_and_ticker, sender=sender,
     )
@@ -290,6 +364,48 @@ def test_changed_analysis_content_is_resent(build_pdf_bytes, tmp_path):
     assert len(sender.messages) == 1
     assert stale_hash in state.sent_hashes  # old hash stays; it's a set, not replaced
     assert len(state.sent_hashes) == 2
+
+
+def test_changed_decision_result_invalidates_the_gemini_cache_entry(build_pdf_bytes, tmp_path):
+    """A materially different deterministic decision (e.g. a resolved
+    conflict changed the signal) changes the Gemini cache key too (see
+    compute_document_content_hash's decision_signature component) — the
+    old cached narrative is never reused for a new decision; it's
+    correctly a cache miss ("no analysis yet" for *this* decision), not
+    a silent resend of stale content explaining a different signal."""
+    pdf_cache = PdfCache(tmp_path / "pdfs")
+    pdf_cache.put("obj-1", build_pdf_bytes(text="Halka arz talep toplama ile ilgili bilgiler bu sayfada yer almaktadir"))
+    disclosures = [_disclosure(disclosure_id="d1", obj_id="obj-1")]
+    facts = _facts_not_found()
+    old_decision = _decision_result(signal="skip")
+    analysis_cache = AnalysisCache(tmp_path / "analysis")
+    old_record = _seed_completed_analysis(
+        pdf_cache=pdf_cache, analysis_cache=analysis_cache, disclosures=disclosures, facts=facts, analysis=_analysis(),
+        decision_result=old_decision,
+    )
+    already_sent_hash = analysis_notification_hash(
+        spk_record_id=RECORD_ID, ticker="QUICK", model=MODEL, prompt_version=PROMPT_VERSION, record=old_record
+    )
+    state = SentAnalysesState(sent_hashes={already_sent_hash})
+    sender = _RecordingSender()
+
+    # A fresh run recomputed the decision differently (e.g. new data
+    # resolved a conflict) — same Gemini narrative content, but a
+    # different cache entry (different decision_result -> different
+    # content hash), so this is a genuine cache miss, correctly skipped
+    # as "no analysis yet" for the *new* decision rather than resending
+    # stale content.
+    new_decision = _decision_result(signal="participate")
+    result = deliver_pending_analyses(
+        company_facts={RECORD_ID: facts}, disclosures_by_record={RECORD_ID: disclosures},
+        decision_results={RECORD_ID: new_decision}, pdf_cache=pdf_cache,
+        analysis_cache=analysis_cache, model=MODEL, prompt_version=PROMPT_VERSION, state=state,
+        infer_company_name_and_ticker=_infer_company_name_and_ticker, sender=sender,
+    )
+
+    assert result.sent_record_ids == []
+    assert result.skipped_no_analysis_record_ids == [RECORD_ID]
+    assert sender.messages == []
 
 
 # --------------------------------------------------------------------------
@@ -302,14 +418,19 @@ def test_failed_send_does_not_update_state_and_is_retried_next_call(build_pdf_by
     pdf_cache.put("obj-1", build_pdf_bytes(text="Halka arz talep toplama ile ilgili bilgiler bu sayfada yer almaktadir"))
     disclosures = [_disclosure(disclosure_id="d1", obj_id="obj-1")]
     facts = _facts_not_found()
+    decision_result = _decision_result()
     analysis_cache = AnalysisCache(tmp_path / "analysis")
-    _seed_completed_analysis(pdf_cache=pdf_cache, analysis_cache=analysis_cache, disclosures=disclosures, facts=facts, analysis=_analysis())
+    _seed_completed_analysis(
+        pdf_cache=pdf_cache, analysis_cache=analysis_cache, disclosures=disclosures, facts=facts, analysis=_analysis(),
+        decision_result=decision_result,
+    )
 
     state = SentAnalysesState()
     failing_sender = _RecordingSender(fail=True)
 
     first = deliver_pending_analyses(
-        company_facts={RECORD_ID: facts}, disclosures_by_record={RECORD_ID: disclosures}, pdf_cache=pdf_cache,
+        company_facts={RECORD_ID: facts}, disclosures_by_record={RECORD_ID: disclosures},
+        decision_results={RECORD_ID: decision_result}, pdf_cache=pdf_cache,
         analysis_cache=analysis_cache, model=MODEL, prompt_version=PROMPT_VERSION, state=state,
         infer_company_name_and_ticker=_infer_company_name_and_ticker, sender=failing_sender,
     )
@@ -320,7 +441,8 @@ def test_failed_send_does_not_update_state_and_is_retried_next_call(build_pdf_by
     # Next run (same state, this time delivery succeeds) picks it right back up.
     working_sender = _RecordingSender()
     second = deliver_pending_analyses(
-        company_facts={RECORD_ID: facts}, disclosures_by_record={RECORD_ID: disclosures}, pdf_cache=pdf_cache,
+        company_facts={RECORD_ID: facts}, disclosures_by_record={RECORD_ID: disclosures},
+        decision_results={RECORD_ID: decision_result}, pdf_cache=pdf_cache,
         analysis_cache=analysis_cache, model=MODEL, prompt_version=PROMPT_VERSION, state=state,
         infer_company_name_and_ticker=_infer_company_name_and_ticker, sender=working_sender,
     )
@@ -343,15 +465,20 @@ def test_dry_run_like_usage_never_touches_state_file_on_disk(build_pdf_bytes, tm
     pdf_cache.put("obj-1", build_pdf_bytes(text="Halka arz talep toplama ile ilgili bilgiler bu sayfada yer almaktadir"))
     disclosures = [_disclosure(disclosure_id="d1", obj_id="obj-1")]
     facts = _facts_not_found()
+    decision_result = _decision_result()
     analysis_cache = AnalysisCache(tmp_path / "analysis")
-    _seed_completed_analysis(pdf_cache=pdf_cache, analysis_cache=analysis_cache, disclosures=disclosures, facts=facts, analysis=_analysis())
+    _seed_completed_analysis(
+        pdf_cache=pdf_cache, analysis_cache=analysis_cache, disclosures=disclosures, facts=facts, analysis=_analysis(),
+        decision_result=decision_result,
+    )
 
     state_path = tmp_path / "state" / "sent_analyses.json"
     state, _ = load_state(state_path)
     sender = _RecordingSender()  # a dry-run sender that "succeeds" (just prints, in the real CLI)
 
     result = deliver_pending_analyses(
-        company_facts={RECORD_ID: facts}, disclosures_by_record={RECORD_ID: disclosures}, pdf_cache=pdf_cache,
+        company_facts={RECORD_ID: facts}, disclosures_by_record={RECORD_ID: disclosures},
+        decision_results={RECORD_ID: decision_result}, pdf_cache=pdf_cache,
         analysis_cache=analysis_cache, model=MODEL, prompt_version=PROMPT_VERSION, state=state,
         infer_company_name_and_ticker=_infer_company_name_and_ticker, sender=sender,
     )

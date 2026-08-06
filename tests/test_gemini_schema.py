@@ -16,9 +16,7 @@ def valid_payload(**overrides) -> dict:
         "negative_factors": ["Olumsuz 1"],
         "missing_information": [],
         "data_conflicts": [],
-        "participation_signal": "participate",
-        "participation_rationale": "Gerekçe.",
-        "confidence": 0.7,
+        "decision_explanation": "Karar motoru açıklaması.",
         "source_references": [{"disclosure_id": "d1", "page_number": 1}],
     }
     payload.update(overrides)
@@ -27,16 +25,10 @@ def valid_payload(**overrides) -> dict:
 
 def test_valid_payload_round_trips():
     output = validate_analysis_output(valid_payload(), allowed_references=ALLOWED)
-    assert output.participation_signal == "participate"
-    assert output.confidence == 0.7
+    assert output.decision_explanation == "Karar motoru açıklaması."
     assert output.source_references[0].disclosure_id == "d1"
     assert output.source_references[0].page_number == 1
     assert output.as_dict()["source_references"] == [{"disclosure_id": "d1", "page_number": 1}]
-
-
-def test_rejects_invalid_participation_signal():
-    with pytest.raises(GeminiOutputError, match="participation_signal"):
-        validate_analysis_output(valid_payload(participation_signal="buy_now"), allowed_references=ALLOWED)
 
 
 def test_rejects_source_reference_not_in_allowed_set():
@@ -49,14 +41,9 @@ def test_rejects_source_reference_not_in_allowed_set():
 
 def test_rejects_missing_required_field():
     payload = valid_payload()
-    del payload["confidence"]
+    del payload["decision_explanation"]
     with pytest.raises(GeminiOutputError, match="missing required field"):
         validate_analysis_output(payload, allowed_references=ALLOWED)
-
-
-def test_rejects_confidence_out_of_range():
-    with pytest.raises(GeminiOutputError, match="confidence"):
-        validate_analysis_output(valid_payload(confidence=1.5), allowed_references=ALLOWED)
 
 
 def test_rejects_non_object_top_level():

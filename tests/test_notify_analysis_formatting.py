@@ -1,5 +1,6 @@
 from datetime import UTC, date, datetime
 
+from halka_arz_advisor.decision.engine import CategoryScoreResult, DecisionResult, HardRuleResult
 from halka_arz_advisor.gemini.models import AnalysisRecord
 from halka_arz_advisor.gemini.schema import AnalysisOutput, SourceReference
 from halka_arz_advisor.kap.extraction import FieldObservation, SourceRef, build_extracted_facts
@@ -30,6 +31,30 @@ def _facts(**overrides):
     return build_extracted_facts(prospectus, announcement)
 
 
+def _decision_result(**overrides) -> DecisionResult:
+    defaults = dict(
+        signal="participate",
+        total_score=72.0,
+        confidence_score=82.0,
+        category_scores=(
+            CategoryScoreResult("fundamental_quality", 70.0, 0.8, "OK", ()),
+            CategoryScoreResult("valuation", 65.0, 0.75, "OK", ()),
+            CategoryScoreResult("offering_structure", 80.0, 1.0, "OK", ()),
+        ),
+        feature_contributions=(),
+        confidence_components=(),
+        hard_rules=(
+            HardRuleResult("missing_mandatory_documents", "insufficient_data", False, "every mandatory pre-offer feature has a readable source document"),
+        ),
+        warnings=(),
+        evidence_references=(),
+        rule_version="expert_v0",
+        weight_set_version="expert_v0",
+    )
+    defaults.update(overrides)
+    return DecisionResult(**defaults)
+
+
 def _analysis(**overrides) -> AnalysisOutput:
     defaults = dict(
         company_summary="Şirket özeti.",
@@ -40,9 +65,7 @@ def _analysis(**overrides) -> AnalysisOutput:
         negative_factors=("Olumsuz 1",),
         missing_information=("Eksik 1",),
         data_conflicts=("Çelişki 1",),
-        participation_signal="participate",
-        participation_rationale="Kısa gerekçe metni.",
-        confidence=0.82,
+        decision_explanation="Kısa gerekçe metni.",
         source_references=(SourceReference("d1", 1), SourceReference("d2", 2)),
     )
     defaults.update(overrides)
@@ -58,6 +81,7 @@ def _completed_record(**overrides) -> AnalysisRecord:
         llm_analysis=analysis,
         llm_warnings=(),
         analyzed_at=datetime(2026, 8, 6, tzinfo=UTC),
+        decision_result=_decision_result(),
     )
     defaults.update(overrides)
     return AnalysisRecord(**defaults)
@@ -71,6 +95,7 @@ def _insufficient_data_record(**overrides) -> AnalysisRecord:
         llm_analysis=None,
         llm_warnings=("no extractable PDF text available in the cache for this company's documents",),
         analyzed_at=datetime(2026, 8, 6, tzinfo=UTC),
+        decision_result=_decision_result(),
     )
     defaults.update(overrides)
     return AnalysisRecord(**defaults)
@@ -97,28 +122,32 @@ def test_completed_message_contains_all_sections():
 
     assert message.startswith("📊 QUİCK SİGORTA A.Ş. (QUICK)")
     assert "Karar desteği: Katıl" in message
-    assert "Güven: %82" in message
+    assert "skor: 72/100" in message
+    assert "güven: %82" in message
+    assert "Kategori skorları:" in message
+    assert "Temel nitelik: 70/100" in message
+    assert "Değerleme: 65/100" in message
+    assert "Arz yapısı: 80/100" in message
     assert "Fiyat: 76.60 TL" in message
     assert "Talep tarihleri: 01.08.2026 - 03.08.2026" in message
     assert "Dağıtım: Oransal Dağıtım" in message
     assert "Gerekçe:\nKısa gerekçe metni." in message
     assert "Olumlu:\n• Olumlu 1\n• Olumlu 2" in message
-    assert "Riskler:\n• Risk 1\n• Risk 2" in message
+    assert "Risk 1" in message and "Risk 2" in message
     assert "Eksik/çelişkili bilgi:\n• Eksik 1\n• Çelişki 1" in message
     assert "Kaynaklar:\n• https://www.kap.org.tr/tr/Bildirim/1\n• https://www.kap.org.tr/tr/Bildirim/2" in message
     # never the raw JSON / full schema dump
-    assert "participation_signal" not in message
     assert "source_references" not in message
 
 
-def test_participation_signal_labels_are_turkish():
+def test_signal_labels_are_turkish():
     for signal, label in [
         ("participate", "Katıl"),
         ("limited_participation", "Sınırlı katıl"),
         ("skip", "Pas geç"),
         ("insufficient_data", "Yetersiz veri"),
     ]:
-        record = _completed_record(llm_analysis=_analysis(participation_signal=signal))
+        record = _completed_record(decision_result=_decision_result(signal=signal))
         message = format_analysis_notification(
             company_name="X", ticker="X", facts=_facts(), record=record, disclosure_notification_urls={}
         )
@@ -126,11 +155,12 @@ def test_participation_signal_labels_are_turkish():
 
 
 # --------------------------------------------------------------------------
-# insufficient_data (system-level: no llm_analysis at all)
+# insufficient_data (system-level: no llm_analysis at all, but a real
+# decision_result still exists — the deterministic explanation is used).
 # --------------------------------------------------------------------------
 
 
-def test_insufficient_data_record_renders_fallback():
+def test_insufficient_data_record_renders_deterministic_fallback():
     record = _insufficient_data_record()
     urls = {"d1": "https://www.kap.org.tr/tr/Bildirim/1"}
 
@@ -138,13 +168,21 @@ def test_insufficient_data_record_renders_fallback():
         company_name="QUİCK SİGORTA A.Ş.", ticker="QUICK", facts=_facts(), record=record, disclosure_notification_urls=urls
     )
 
-    assert "Karar desteği: Yetersiz veri" in message
-    assert "Güven:" not in message
-    assert "Bu şirket için önbellekte yeterli belge metni bulunamadığından analiz yapılamadı." in message
-    assert "Olumlu:" not in message
-    assert "Riskler:" not in message
-    assert "Eksik/çelişkili bilgi:" not in message
+    assert "Karar desteği: Katıl" in message  # from decision_result, not Gemini
+    assert "Sinyal: KATIL" in message  # from decision.explain.format_explanation's fallback rationale
     assert "Kaynaklar:\n• https://www.kap.org.tr/tr/Bildirim/1" in message
+
+
+def test_no_decision_result_at_all_renders_system_fallback():
+    # A genuinely undeliverable case shouldn't occur via
+    # notify.analysis_delivery (it skips companies with no decision), but
+    # the formatter itself must still degrade gracefully.
+    record = _insufficient_data_record(decision_result=None)
+    message = format_analysis_notification(
+        company_name="X", ticker="X", facts=_facts(), record=record, disclosure_notification_urls={}
+    )
+    assert "Karar desteği: Yetersiz veri" in message
+    assert "Bu şirket için önbellekte yeterli belge metni bulunamadığından analiz yapılamadı." in message
 
 
 # --------------------------------------------------------------------------
@@ -170,8 +208,6 @@ def test_empty_optional_lists_omit_their_sections():
     message = format_analysis_notification(
         company_name="X", ticker="X", facts=_facts(), record=record, disclosure_notification_urls={}
     )
-    assert "Olumlu:" not in message
-    assert "Riskler:" not in message
     assert "Eksik/çelişkili bilgi:" not in message
     assert "Kaynaklar:" not in message  # no matching URLs supplied either
 
@@ -196,9 +232,12 @@ def test_lists_are_capped_at_their_maximums():
         company_name="X", ticker="X", facts=_facts(), record=record, disclosure_notification_urls=urls
     )
     assert message.count("• Olumlu") == MAX_POSITIVE_ITEMS
-    assert message.count("• Risk") == MAX_RISK_ITEMS
     assert message.count("• Eksik") == MAX_MISSING_ITEMS
     assert message.count("kap.org.tr/tr/Bildirim/") == MAX_SOURCE_URLS
+    # risk section mixes Gemini's key_risks with any triggered hard
+    # rules, still capped at MAX_RISK_ITEMS total
+    risk_block = message.split("Riskler / kısıtlayıcı kurallar:\n", 1)[1].split("\n\n", 1)[0]
+    assert risk_block.count("•") == MAX_RISK_ITEMS
 
 
 # --------------------------------------------------------------------------
@@ -208,7 +247,7 @@ def test_lists_are_capped_at_their_maximums():
 
 def test_long_rationale_is_truncated():
     long_rationale = "Çok uzun bir gerekçe. " * 200  # far beyond MAX_RATIONALE_CHARS
-    record = _completed_record(llm_analysis=_analysis(participation_rationale=long_rationale))
+    record = _completed_record(llm_analysis=_analysis(decision_explanation=long_rationale))
     message = format_analysis_notification(
         company_name="X", ticker="X", facts=_facts(), record=record, disclosure_notification_urls={}
     )
@@ -224,7 +263,7 @@ def test_overall_message_never_exceeds_telegram_safe_limit():
             positive_factors=tuple("Olumlu " + "x" * 1000 for _ in range(3)),
             key_risks=tuple("Risk " + "y" * 1000 for _ in range(3)),
             missing_information=tuple("Eksik " + "z" * 1000 for _ in range(2)),
-            participation_rationale="Gerekçe " * 500,
+            decision_explanation="Gerekçe " * 500,
         )
     )
     message = format_analysis_notification(

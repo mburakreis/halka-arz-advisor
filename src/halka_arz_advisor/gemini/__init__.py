@@ -28,7 +28,7 @@ from .exceptions import (
     GeminiUnavailableError,
 )
 from .models import AnalysisRecord, LlmStatus
-from .schema import ANALYSIS_JSON_SCHEMA, PARTICIPATION_SIGNAL_VALUES, AnalysisOutput, SourceReference
+from .schema import ANALYSIS_JSON_SCHEMA, AnalysisOutput, SourceReference
 
 __all__ = [
     "analyze_company",
@@ -47,7 +47,6 @@ __all__ = [
     "AnalysisOutput",
     "SourceReference",
     "ANALYSIS_JSON_SCHEMA",
-    "PARTICIPATION_SIGNAL_VALUES",
     "GeminiError",
     "GeminiConfigError",
     "GeminiUnavailableError",

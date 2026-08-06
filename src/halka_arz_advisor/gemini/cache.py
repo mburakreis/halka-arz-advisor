@@ -4,6 +4,19 @@ Keyed by a hash of ``(document_content_hash, model_name, prompt_version,
 schema_version)`` — change any one of those (the input text/facts, the
 model, or either version) and the cache key changes, so a second run
 with genuinely unchanged inputs is the only case that hits the cache.
+``document_content_hash`` already folds in the deterministic decision's
+time-stable signature (see
+:func:`halka_arz_advisor.gemini.analysis.compute_document_content_hash`),
+so a materially different decision also changes the cache key.
+
+Deliberately does *not* persist ``AnalysisRecord.decision_result`` to
+disk — it's cheap to recompute deterministically from the same cached
+KAP/SPK data every time, and doing so keeps whatever's *displayed*
+(e.g. ``document_freshness``-driven confidence drift) always reflecting
+the current moment rather than a stale snapshot from whenever Gemini
+was first called. Callers (:mod:`halka_arz_advisor.gemini.analysis`)
+attach the freshly computed ``decision_result`` to whatever record this
+cache returns, cached or not.
 """
 
 from __future__ import annotations
@@ -32,9 +45,7 @@ def _analysis_output_from_dict(data: dict) -> AnalysisOutput:
         negative_factors=tuple(data["negative_factors"]),
         missing_information=tuple(data["missing_information"]),
         data_conflicts=tuple(data["data_conflicts"]),
-        participation_signal=data["participation_signal"],
-        participation_rationale=data["participation_rationale"],
-        confidence=data["confidence"],
+        decision_explanation=data["decision_explanation"],
         source_references=tuple(
             SourceReference(disclosure_id=r["disclosure_id"], page_number=r["page_number"])
             for r in data["source_references"]

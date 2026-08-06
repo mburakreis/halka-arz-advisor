@@ -36,12 +36,18 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from halka_arz_advisor.decision.pipeline import compute_decision_results  # noqa: E402
 from halka_arz_advisor.gemini.cache import AnalysisCache  # noqa: E402
 from halka_arz_advisor.gemini.config import DEFAULT_MODEL  # noqa: E402
 from halka_arz_advisor.gemini.prompt import PROMPT_VERSION  # noqa: E402
 from halka_arz_advisor.kap.classification import target_document_types  # noqa: E402
 from halka_arz_advisor.kap.client import KapClient  # noqa: E402
-from halka_arz_advisor.kap.documents import DEFAULT_CACHE_DIR, aggregate_company_facts, process_disclosure_documents  # noqa: E402
+from halka_arz_advisor.kap.documents import (  # noqa: E402
+    DEFAULT_CACHE_DIR,
+    aggregate_company_facts,
+    infer_company_name_and_ticker,
+    process_disclosure_documents,
+)
 from halka_arz_advisor.kap.exceptions import KapApiError  # noqa: E402
 from halka_arz_advisor.kap.matching import match_disclosure  # noqa: E402
 from halka_arz_advisor.kap.models import KapDisclosure  # noqa: E402
@@ -94,15 +100,6 @@ def _matches_ticker_filter(disclosure: KapDisclosure, ticker_filter: str) -> boo
     if disclosure.matched_spk_record_id and disclosure.matched_spk_record_id.startswith(f"ipo:{wanted}:"):
         return True
     return wanted in disclosure.company_name.upper()
-
-
-def _infer_company_name_and_ticker(record_id: str, disclosures: list[KapDisclosure]) -> tuple[str, str | None]:
-    for d in disclosures:
-        if d.ticker:
-            return d.company_name, d.ticker
-    company_name = disclosures[0].company_name if disclosures else record_id
-    ticker = record_id.split(":")[1] if record_id.startswith("ipo:") else None
-    return company_name, ticker
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -170,7 +167,13 @@ def main(argv: list[str] | None = None) -> int:
         if d.matched_spk_record_id:
             disclosures_by_record.setdefault(d.matched_spk_record_id, []).append(d)
 
-    if not company_facts:
+    # Computed the exact same way scripts/analyze_pending_ipos.py already
+    # did, from the same cached data — required for the Gemini analysis
+    # cache key (see halka_arz_advisor.decision.pipeline's module
+    # docstring) to line up between the two separate script runs.
+    decision_results = compute_decision_results(processed, ipo_records=tuple(ipo_records), application_records=tuple(application_records))
+
+    if not decision_results:
         print("No companies with cached, matched documents to consider.", file=sys.stderr)
 
     analysis_cache = AnalysisCache(args.analysis_cache_dir)
@@ -188,12 +191,13 @@ def main(argv: list[str] | None = None) -> int:
     result = deliver_pending_analyses(
         company_facts=company_facts,
         disclosures_by_record=disclosures_by_record,
+        decision_results=decision_results,
         pdf_cache=pdf_cache,
         analysis_cache=analysis_cache,
         model=model,
         prompt_version=PROMPT_VERSION,
         state=state,
-        infer_company_name_and_ticker=_infer_company_name_and_ticker,
+        infer_company_name_and_ticker=infer_company_name_and_ticker,
         sender=_sender,
         ocr_cache=ocr_cache,
     )

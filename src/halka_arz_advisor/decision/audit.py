@@ -70,6 +70,34 @@ _CORE_FIELDS_FOR_CONFIDENCE: tuple[str, ...] = (
     "capital_increase_ratio",
 )
 
+# Document types whose own companyTitle reliably names the *subject*
+# company itself — checked in this order when picking a fallback
+# company_name for sector classification. Deliberately excludes:
+# - "trading_start" ("İşlem Görmeye Başlama"): confirmed against real
+#   KAP data that this notice type is filed under Borsa İstanbul's own
+#   name ("BORSA İSTANBUL A.Ş."), not the company that just started
+#   trading.
+# - "price_determination_report"/"ipo_results" ("Fiyat Tespit Raporu"/
+#   "Halka Arz Sonuçları"): per this project's own established finding
+#   (see kap.models._extract_ticker's docstring), these are typically
+#   filed by the IPO's intermediary brokerage under its *own* KAP
+#   membership — companyTitle names the broker, not the issuer.
+# Picking either as a fallback silently misclassifies the company's
+# sector (e.g. an insurer read as "standard", losing its NOT_APPLICABLE
+# gates) or misattributes it to an unrelated brokerage.
+_COMPANY_NAME_SOURCE_PRIORITY: tuple[str, ...] = (
+    "approved_prospectus",
+    "investor_sale_announcement",
+)
+
+
+def _fallback_company_name(disclosures: tuple[KapDisclosure, ...]) -> str | None:
+    for document_type in _COMPANY_NAME_SOURCE_PRIORITY:
+        for disclosure in disclosures:
+            if disclosure.document_type == document_type and disclosure.company_name:
+                return disclosure.company_name
+    return next((d.company_name for d in disclosures if d.company_name), None)
+
 
 def _json_safe(value: object) -> object:
     if isinstance(value, (date, datetime)):
@@ -140,14 +168,14 @@ class CompanyDecisionInputs:
     financial_observations: tuple[FinancialObservation, ...] = ()
     # The company's registered legal name — used only for
     # halka_arz_advisor.kap.sector's deterministic, name-based sector
-    # classification (never inferred from PDF text). Falls back to the
-    # first disclosure's own company_name when not given explicitly.
+    # classification (never inferred from PDF text). Falls back to a
+    # disclosure's own company_name when not given explicitly — see
+    # _fallback_company_name for which one.
     company_name: str | None = None
 
     @property
     def sector(self) -> Sector:
-        name = self.company_name or next((d.company_name for d in self.disclosures if d.company_name), None)
-        return classify_sector(name)
+        return classify_sector(self.company_name or _fallback_company_name(self.disclosures))
 
 
 def _combine(statuses: list[FeatureStatus]) -> FeatureStatus:

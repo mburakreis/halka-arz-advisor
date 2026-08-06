@@ -2,6 +2,19 @@
 analysis — mirrors :mod:`halka_arz_advisor.notify.formatting`'s role
 for SPK records.
 
+Signal, total score, confidence, and category scores always come from
+``record.decision_result`` — the deterministic
+:class:`~halka_arz_advisor.decision.engine.DecisionResult`, the sole
+source of truth for those numbers (see
+:mod:`halka_arz_advisor.gemini.schema`'s module docstring: Gemini's own
+output no longer even carries a signal or confidence). Gemini's
+narrative (``record.llm_analysis``) is used for the explanation/positive-
+factors/risks sections when available (``llm_status == "completed"``);
+otherwise this falls back to
+:func:`halka_arz_advisor.decision.explain.format_explanation` and the
+deterministic top/bottom feature contributions — the message is never
+just "no analysis available" as long as a decision could be computed.
+
 Deliberately concise: never the raw JSON, never a whole prospectus
 excerpt, never every source reference — a fixed handful of capped
 sections plus up to 3 KAP notification URLs so the reader can go read
@@ -10,6 +23,8 @@ the primary source themselves.
 
 from __future__ import annotations
 
+from ..decision.engine import top_negative_contributions, top_positive_contributions
+from ..decision.explain import format_explanation
 from ..gemini.models import AnalysisRecord
 from ..kap.extraction import ExtractedFacts
 
@@ -27,6 +42,12 @@ _SIGNAL_LABELS_TR: dict[str, str] = {
     "limited_participation": "Sınırlı katıl",
     "skip": "Pas geç",
     "insufficient_data": "Yetersiz veri",
+}
+
+_CATEGORY_LABELS_TR: dict[str, str] = {
+    "fundamental_quality": "Temel nitelik",
+    "valuation": "Değerleme",
+    "offering_structure": "Arz yapısı",
 }
 
 _NO_ANALYSIS_RATIONALE_TR = (
@@ -86,18 +107,25 @@ def format_analysis_notification(
     ``disclosure_notification_urls`` maps ``disclosure_id -> KAP
     notification URL`` for the company's matched disclosures — used to
     resolve the "Kaynaklar" section from ``record``'s
-    ``source_references`` (when completed) or from every matched
-    disclosure (when ``insufficient_data``, since there are no
-    source_references to draw from).
+    ``source_references`` (when Gemini completed) or from every matched
+    disclosure (otherwise, since there are no source_references to draw
+    from).
     """
+    decision = record.decision_result
     analysis = record.llm_analysis if record.llm_status == "completed" else None
 
     lines: list[str] = [f"📊 {company_name} ({ticker or 'bilinmiyor'})", ""]
 
-    if analysis is not None:
-        signal_label = _SIGNAL_LABELS_TR.get(analysis.participation_signal, analysis.participation_signal)
-        lines.append(f"Karar desteği: {signal_label}")
-        lines.append(f"Güven: %{round(analysis.confidence * 100)}")
+    if decision is not None:
+        signal_label = _SIGNAL_LABELS_TR.get(decision.signal, decision.signal)
+        total_str = f"{decision.total_score:.0f}" if decision.total_score is not None else "yok"
+        lines.append(f"Karar desteği: {signal_label}  (skor: {total_str}/100, güven: %{decision.confidence_score:.0f})")
+        lines.append("")
+        lines.append("Kategori skorları:")
+        for category in decision.category_scores:
+            label = _CATEGORY_LABELS_TR.get(category.category, category.category)
+            score_str = f"{category.score:.0f}" if category.score is not None else "yok"
+            lines.append(f"  • {label}: {score_str}/100 (kapsam %{category.coverage * 100:.0f})")
     else:
         lines.append("Karar desteği: Yetersiz veri")
 
@@ -108,19 +136,40 @@ def format_analysis_notification(
 
     lines.append("")
     lines.append("Gerekçe:")
-    rationale = _sanitize(analysis.participation_rationale) if analysis is not None else _NO_ANALYSIS_RATIONALE_TR
+    if analysis is not None:
+        rationale = _sanitize(analysis.decision_explanation)
+    elif decision is not None:
+        # Gemini failed validation or had no document text — fall back
+        # to the deterministic Turkish explanation of the same result.
+        rationale = _sanitize(format_explanation(decision))
+    else:
+        rationale = _NO_ANALYSIS_RATIONALE_TR
     lines.append(rationale[:MAX_RATIONALE_CHARS])
 
-    if analysis is not None and analysis.positive_factors:
+    positive_items = list(analysis.positive_factors) if analysis is not None else []
+    if not positive_items and decision is not None:
+        positive_items = [
+            f"{c.feature_id} ({c.category}): {c.normalized_score:.0f}/100"
+            for c in top_positive_contributions(decision, MAX_POSITIVE_ITEMS)
+        ]
+    if positive_items:
         lines.append("")
         lines.append("Olumlu:")
-        for item in analysis.positive_factors[:MAX_POSITIVE_ITEMS]:
+        for item in positive_items[:MAX_POSITIVE_ITEMS]:
             lines.append(f"• {_sanitize(item)}")
 
-    if analysis is not None and analysis.key_risks:
+    risk_items = list(analysis.key_risks) if analysis is not None else []
+    if decision is not None:
+        risk_items += [rule.reason for rule in decision.hard_rules if rule.triggered]
+    if not risk_items and decision is not None:
+        risk_items = [
+            f"{c.feature_id} ({c.category}): {c.normalized_score:.0f}/100"
+            for c in top_negative_contributions(decision, MAX_RISK_ITEMS)
+        ]
+    if risk_items:
         lines.append("")
-        lines.append("Riskler:")
-        for item in analysis.key_risks[:MAX_RISK_ITEMS]:
+        lines.append("Riskler / kısıtlayıcı kurallar:")
+        for item in risk_items[:MAX_RISK_ITEMS]:
             lines.append(f"• {_sanitize(item)}")
 
     if analysis is not None:

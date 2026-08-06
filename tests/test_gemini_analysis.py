@@ -6,6 +6,7 @@ import httpx
 import pytest
 from google.genai import errors as genai_errors
 
+from halka_arz_advisor.decision.engine import DecisionResult
 from halka_arz_advisor.gemini.analysis import analyze_company, verify_gemini_ready
 from halka_arz_advisor.gemini.cache import AnalysisCache, compute_cache_key
 from halka_arz_advisor.gemini.client import GeminiClient
@@ -15,6 +16,24 @@ from halka_arz_advisor.kap.attachments import KapAttachment
 from halka_arz_advisor.kap.extraction import FieldObservation, SourceRef, build_extracted_facts
 from halka_arz_advisor.kap.models import KapDisclosure
 from halka_arz_advisor.kap.pdf import PdfCache
+
+
+def _decision_result(**overrides) -> DecisionResult:
+    defaults = dict(
+        signal="participate",
+        total_score=70.0,
+        confidence_score=75.0,
+        category_scores=(),
+        feature_contributions=(),
+        confidence_components=(),
+        hard_rules=(),
+        warnings=(),
+        evidence_references=(),
+        rule_version="expert_v0",
+        weight_set_version="expert_v0",
+    )
+    defaults.update(overrides)
+    return DecisionResult(**defaults)
 
 
 def make_config(**overrides) -> GeminiConfig:
@@ -113,9 +132,7 @@ def valid_response_payload(**overrides) -> dict:
         "negative_factors": ["Olumsuz 1"],
         "missing_information": [],
         "data_conflicts": [],
-        "participation_signal": "participate",
-        "participation_rationale": "Gerekçe.",
-        "confidence": 0.7,
+        "decision_explanation": "Karar motoru açıklaması.",
         "source_references": [{"disclosure_id": "d1", "page_number": 1}],
     }
     payload.update(overrides)
@@ -132,6 +149,7 @@ def _company_kwargs(disclosures, pdf_cache, analysis_cache, gemini_client, **ove
         pdf_cache=pdf_cache,
         analysis_cache=analysis_cache,
         gemini_client=gemini_client,
+        decision_result=_decision_result(),
     )
     kwargs.update(overrides)
     return kwargs
@@ -172,8 +190,12 @@ def test_valid_response_produces_completed_record(build_pdf_bytes, tmp_path):
     assert record.llm_status == "completed"
     assert record.llm_model == "gemini-3.5-flash"
     assert record.llm_analysis is not None
-    assert record.llm_analysis.participation_signal == "participate"
+    assert record.llm_analysis.decision_explanation == "Karar motoru açıklaması."
     assert record.llm_warnings == ()
+    # The signal/score/confidence come from the deterministic decision,
+    # never from Gemini's own output (which no longer even has them).
+    assert record.decision_result is not None
+    assert record.decision_result.signal == "participate"
 
 
 def test_transient_error_propagates_and_is_not_cached(build_pdf_bytes, tmp_path):
@@ -224,22 +246,6 @@ def test_invalid_json_twice_marks_invalid_output_with_raw_response(build_pdf_byt
     assert record.llm_analysis is None
     assert record.raw_response == "still not json either"
     assert len(record.llm_warnings) == 2
-
-
-def test_invalid_participation_signal_treated_as_invalid_output(build_pdf_bytes, tmp_path):
-    pdf_bytes = build_pdf_bytes(text="Halka arz talep toplama ile ilgili bilgiler bu sayfada yer almaktadir")
-    pdf_cache = PdfCache(tmp_path / "pdfs")
-    pdf_cache.put("obj-1", pdf_bytes)
-    disclosures = [_disclosure(disclosure_id="d1", obj_id="obj-1")]
-
-    bad_signal = json.dumps(valid_response_payload(participation_signal="buy_now"))
-    client = make_client(generate_results=[bad_signal, bad_signal])
-    record = analyze_company(
-        **_company_kwargs(disclosures, pdf_cache, AnalysisCache(tmp_path / "analysis"), client)
-    )
-
-    assert record.llm_status == "invalid_output"
-    assert any("participation_signal" in w for w in record.llm_warnings)
 
 
 def test_invented_source_reference_is_rejected(build_pdf_bytes, tmp_path):

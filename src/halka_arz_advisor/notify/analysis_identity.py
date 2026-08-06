@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 
+from ..decision.engine import decision_signature
 from ..gemini.models import AnalysisRecord
 
 
@@ -19,16 +20,24 @@ def _analysis_content_key(record: AnalysisRecord) -> str:
     """A canonical string representing exactly what would change the
     Telegram message's content.
 
-    ``llm_status == "completed"`` records carry the full structured
-    output — any field changing (a new risk, a different rationale,
-    ...) changes this key. ``llm_status == "insufficient_data"`` records
-    have no ``llm_analysis`` at all, so the status itself is the entire
-    content that could change (e.g. later becoming "completed" once
-    documents are cached).
+    Always folds in the deterministic decision's time-stable signature
+    (see :func:`halka_arz_advisor.decision.engine.decision_signature` —
+    deliberately excludes confidence/freshness drift, so a routine day
+    passing never counts as "changed"), so a materially different
+    decision (a new document processed, a resolved conflict, ...)
+    always triggers a re-send even if Gemini's own narrative or status
+    happens not to change. ``llm_status == "completed"`` records also
+    fold in the full structured narrative output (any field changing —
+    a new risk, a different explanation, ...) changes this key;
+    otherwise the status itself is folded in (e.g. later becoming
+    "completed" once documents are cached is a content change).
     """
+    decision_part = json.dumps(decision_signature(record.decision_result), sort_keys=True) if record.decision_result else "none"
     if record.llm_analysis is not None:
-        return json.dumps(record.llm_analysis.as_dict(), sort_keys=True, ensure_ascii=False)
-    return record.llm_status
+        analysis_part = json.dumps(record.llm_analysis.as_dict(), sort_keys=True, ensure_ascii=False)
+    else:
+        analysis_part = record.llm_status
+    return f"{decision_part}|{analysis_part}"
 
 
 def analysis_notification_hash(

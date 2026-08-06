@@ -30,9 +30,17 @@ from .audit import (
     audit_company,
 )
 from .catalog import FEATURE_CATALOG, get_feature, features_by_category
-from .engine import DecisionResult, evaluate_decision
+from .engine import (
+    DecisionResult,
+    decision_signature,
+    evaluate_decision,
+    top_negative_contributions,
+    top_positive_contributions,
+    unavailable_high_weight_features,
+)
 from .explain import format_explanation
 from .models import CATEGORIES, AvailabilityKind, FeatureCategory, FeatureSpec, OfferTiming
+from .pipeline import compute_decision_results
 from .scoring_config import ScoringConfig, get_scoring_config
 from .snapshot import DecisionSnapshot, build_decision_snapshot
 
@@ -54,6 +62,11 @@ __all__ = [
     "build_decision_snapshot",
     "DecisionResult",
     "evaluate_decision",
+    "decision_signature",
+    "top_positive_contributions",
+    "top_negative_contributions",
+    "unavailable_high_weight_features",
+    "compute_decision_results",
     "format_explanation",
     "ScoringConfig",
     "get_scoring_config",

@@ -1,8 +1,27 @@
 from datetime import UTC, datetime
 
+from halka_arz_advisor.decision.engine import DecisionResult
 from halka_arz_advisor.gemini.models import AnalysisRecord
 from halka_arz_advisor.gemini.schema import AnalysisOutput, SourceReference
 from halka_arz_advisor.notify.analysis_identity import analysis_notification_hash
+
+
+def _decision_result(**overrides) -> DecisionResult:
+    defaults = dict(
+        signal="participate",
+        total_score=70.0,
+        confidence_score=75.0,
+        category_scores=(),
+        feature_contributions=(),
+        confidence_components=(),
+        hard_rules=(),
+        warnings=(),
+        evidence_references=(),
+        rule_version="expert_v0",
+        weight_set_version="expert_v0",
+    )
+    defaults.update(overrides)
+    return DecisionResult(**defaults)
 
 
 def _completed_record(**overrides) -> AnalysisRecord:
@@ -15,9 +34,7 @@ def _completed_record(**overrides) -> AnalysisRecord:
         negative_factors=("Olumsuz 1",),
         missing_information=(),
         data_conflicts=(),
-        participation_signal="participate",
-        participation_rationale="Gerekçe.",
-        confidence=0.8,
+        decision_explanation="Karar motoru açıklaması.",
         source_references=(SourceReference("d1", 1),),
     )
     defaults = dict(
@@ -27,6 +44,7 @@ def _completed_record(**overrides) -> AnalysisRecord:
         llm_analysis=analysis,
         llm_warnings=(),
         analyzed_at=datetime(2026, 8, 6, tzinfo=UTC),
+        decision_result=_decision_result(),
     )
     defaults.update(overrides)
     return AnalysisRecord(**defaults)
@@ -40,6 +58,7 @@ def _insufficient_data_record(**overrides) -> AnalysisRecord:
         llm_analysis=None,
         llm_warnings=("no extractable PDF text",),
         analyzed_at=datetime(2026, 8, 6, tzinfo=UTC),
+        decision_result=_decision_result(),
     )
     defaults.update(overrides)
     return AnalysisRecord(**defaults)
@@ -68,9 +87,7 @@ def test_different_analysis_content_changes_hash():
             negative_factors=("Olumsuz 1",),
             missing_information=(),
             data_conflicts=(),
-            participation_signal="participate",
-            participation_rationale="Gerekçe.",
-            confidence=0.8,
+            decision_explanation="Karar motoru açıklaması.",
             source_references=(SourceReference("d1", 1),),
         )
     )
@@ -81,6 +98,37 @@ def test_different_analysis_content_changes_hash():
         spk_record_id="ipo:QUICK:2026 / 7", ticker="QUICK", model="gemini-3.5-flash", prompt_version="1", record=record_b
     )
     assert h_a != h_b
+
+
+def test_different_decision_signal_changes_hash():
+    # Gemini's narrative is identical — only the deterministic decision
+    # differs — must still count as "content changed" (see
+    # halka_arz_advisor.decision.engine.decision_signature).
+    record_a = _completed_record(decision_result=_decision_result(signal="participate"))
+    record_b = _completed_record(decision_result=_decision_result(signal="skip"))
+    h_a = analysis_notification_hash(
+        spk_record_id="ipo:QUICK:2026 / 7", ticker="QUICK", model="gemini-3.5-flash", prompt_version="1", record=record_a
+    )
+    h_b = analysis_notification_hash(
+        spk_record_id="ipo:QUICK:2026 / 7", ticker="QUICK", model="gemini-3.5-flash", prompt_version="1", record=record_b
+    )
+    assert h_a != h_b
+
+
+def test_different_decision_confidence_alone_does_not_change_hash():
+    # confidence_score alone drifts with document freshness/time — must
+    # not be treated as a content change (see decision_signature's own
+    # docstring for why), or the notification would look "changed" every
+    # single day and get re-sent for no real reason.
+    record_a = _completed_record(decision_result=_decision_result(confidence_score=75.0))
+    record_b = _completed_record(decision_result=_decision_result(confidence_score=60.0))
+    h_a = analysis_notification_hash(
+        spk_record_id="ipo:QUICK:2026 / 7", ticker="QUICK", model="gemini-3.5-flash", prompt_version="1", record=record_a
+    )
+    h_b = analysis_notification_hash(
+        spk_record_id="ipo:QUICK:2026 / 7", ticker="QUICK", model="gemini-3.5-flash", prompt_version="1", record=record_b
+    )
+    assert h_a == h_b
 
 
 def test_different_ticker_or_model_or_prompt_version_changes_hash():

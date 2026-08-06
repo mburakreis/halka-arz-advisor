@@ -6,7 +6,13 @@ actually succeed.
 Mirrors :mod:`halka_arz_advisor.notify.check`'s role for SPK records —
 kept thin, no scoring, and never calls Gemini itself (see
 :func:`halka_arz_advisor.gemini.analysis.lookup_analysis`, a pure cache
-read).
+read). Deliverability is now driven by whether a
+:class:`~halka_arz_advisor.decision.engine.DecisionResult` exists for
+the company, not by Gemini's own status — the deterministic result
+(and :func:`halka_arz_advisor.decision.explain.format_explanation` as
+its narrative fallback) means there's always something worth sending
+once a company has *any* matched KAP/SPK data, whether or not Gemini's
+narrative is available.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from ..decision.engine import DecisionResult
 from ..gemini.analysis import lookup_analysis
 from ..gemini.cache import AnalysisCache
 from ..kap.extraction import ExtractedFacts
@@ -24,8 +31,6 @@ from .analysis_formatting import format_analysis_notification
 from .analysis_identity import analysis_notification_hash
 from .analysis_state import SentAnalysesState
 from .telegram import TelegramSendError
-
-DELIVERABLE_STATUSES = ("completed", "insufficient_data")
 
 # Raises TelegramSendError (or a dry-run stand-in that never raises) on failure.
 Sender = Callable[[str], None]
@@ -44,6 +49,7 @@ def deliver_pending_analyses(
     *,
     company_facts: dict[str, ExtractedFacts],
     disclosures_by_record: dict[str, list[KapDisclosure]],
+    decision_results: dict[str, DecisionResult],
     pdf_cache: PdfCache,
     analysis_cache: AnalysisCache,
     model: str,
@@ -54,10 +60,18 @@ def deliver_pending_analyses(
     ocr_cache: OcrCache | None = None,
     ocr_config: OcrConfig | None = None,
 ) -> DeliveryResult:
-    """For each company: look up its most recent cached analysis (never
-    calling Gemini), skip it unless the status is ``completed`` or
-    ``insufficient_data``, skip it again if its content hash was already
-    sent, then format and hand the message to ``sender``.
+    """For each company with a computed ``decision_results`` entry: look
+    up its most recent cached Gemini analysis (never calling Gemini),
+    skip it if its content hash was already sent, then format and hand
+    the message to ``sender``.
+
+    A company absent from ``decision_results`` (no matched KAP/SPK data
+    at all) is skipped — there's nothing to tell the user. Every company
+    present in it is deliverable regardless of Gemini's own status: the
+    deterministic result is always the source of truth for the
+    signal/scores, and :func:`~halka_arz_advisor.notify.analysis_formatting.format_analysis_notification`
+    falls back to a deterministic explanation when Gemini's narrative
+    isn't ``"completed"``.
 
     ``state.sent_hashes`` is only updated for a company whose ``sender``
     call *succeeds* — a :class:`~halka_arz_advisor.notify.telegram.TelegramSendError`
@@ -67,9 +81,19 @@ def deliver_pending_analyses(
     """
     result = DeliveryResult()
 
-    for record_id, facts in company_facts.items():
+    for record_id, decision_result in decision_results.items():
+        facts = company_facts.get(record_id)
         disclosures_for_company = disclosures_by_record.get(record_id, [])
         company_name, ticker = infer_company_name_and_ticker(record_id, disclosures_for_company)
+
+        if facts is None:
+            # No readable document produced ExtractedFacts for this
+            # company at all (e.g. every cached PDF is scanned/OCR-less)
+            # — format_analysis_notification needs a real ExtractedFacts
+            # to render price/date/distribution, so there's nothing
+            # deliverable yet even though a decision_result exists.
+            result.skipped_no_analysis_record_ids.append(record_id)
+            continue
 
         record = lookup_analysis(
             spk_record_id=record_id,
@@ -78,10 +102,11 @@ def deliver_pending_analyses(
             pdf_cache=pdf_cache,
             analysis_cache=analysis_cache,
             model_name=model,
+            decision_result=decision_result,
             ocr_cache=ocr_cache,
             ocr_config=ocr_config,
         )
-        if record is None or record.llm_status not in DELIVERABLE_STATUSES:
+        if record is None:
             result.skipped_no_analysis_record_ids.append(record_id)
             continue
 

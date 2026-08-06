@@ -16,6 +16,7 @@ from .attachments import KapAttachment
 from .classification import DocumentType, classify_title
 from .exceptions import KapSchemaError
 from .extraction import ExtractedFacts
+from .financials import FinancialObservation
 from .ocr import OcrStatus
 from .pdf import PdfStatus
 
@@ -48,6 +49,12 @@ class KapDisclosure:
     pdf_status: PdfStatus | None = None
     extracted_facts: ExtractedFacts | None = None
     extraction_warnings: tuple[str, ...] = ()
+
+    # Populated alongside extracted_facts, only for document types
+    # halka_arz_advisor.kap.financials's "Gelir Tablosu" table pattern
+    # has been confirmed against (currently price_determination_report
+    # only) — see halka_arz_advisor.kap.documents._FINANCIAL_ELIGIBLE_TYPES.
+    financial_observations: tuple[FinancialObservation, ...] = ()
 
     # Populated only when process_disclosure_documents is run with
     # ocr_scanned=True *and* pdf_status ended up "scanned"/"empty" — a

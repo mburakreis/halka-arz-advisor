@@ -27,6 +27,12 @@ which existing model they'd read from:
   :data:`~halka_arz_advisor.kap.classification.DocumentType` exists for
   the company (used by features that are about a document's presence,
   e.g. a third-party price-determination review).
+- ``financial_series.<metric_name>`` — one metric in
+  :data:`halka_arz_advisor.kap.financials.FINANCIAL_METRIC_NAMES`,
+  resolved against every :class:`~halka_arz_advisor.kap.financials.FinancialObservation`
+  collected for the company (any explicitly labelled period counts;
+  see that module's docstring) — never a single scalar, since a metric
+  is reported for several comparable periods at once.
 - ``market_data.<name>`` — no corresponding model exists in this
   project at all (a genuine, currently out-of-scope data source, e.g.
   a peer/index feed) — always evaluates to ``MISSING_DOCUMENT``.
@@ -83,9 +89,12 @@ FEATURE_CATALOG: tuple[FeatureSpec, ...] = (
         feature_id="financial_statement_summary",
         category="fundamental_quality",
         title="Finansal tablo özeti (gelir/kâr eğilimi)",
-        description="Revenue/profit trend from the prospectus's financial statements section.",
-        required_source_fields=("kap_extraction.financial_statement_summary",),
-        acceptable_sources=_PROSPECTUS_AND_ANNOUNCEMENT,
+        description=(
+            "Revenue and net income across every explicitly labelled comparable period stated in the "
+            "price determination report's own income statement table."
+        ),
+        required_source_fields=("financial_series.revenue", "financial_series.net_income"),
+        acceptable_sources=("price_determination_report",),
         offer_timing="pre_offer",
         is_mandatory=True,
         availability_kind="direct",

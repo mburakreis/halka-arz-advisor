@@ -30,6 +30,7 @@ from .extraction import (
     build_extracted_facts,
     extract_observations_from_pages,
 )
+from .financials import FinancialObservation, extract_financial_observations_from_pages
 from .models import KapDisclosure
 from .ocr import OcrCache, OcrConfig, load_ocr_config_from_env, ocr_pdf
 from .pdf import PdfCache, fetch_and_read_pdf
@@ -45,6 +46,12 @@ DEFAULT_CACHE_DIR = Path("data") / "cache" / "kap_pdfs"
 _EXTRACTION_ELIGIBLE_TYPES = frozenset(
     {"approved_prospectus", "investor_sale_announcement", "ipo_results", "price_determination_report"}
 )
+
+# halka_arz_advisor.kap.financials's "Gelir Tablosu" table pattern has
+# only been confirmed against price_determination_report documents (see
+# that module's docstring) — narrower than _EXTRACTION_ELIGIBLE_TYPES on
+# purpose, not assumed to generalize to the other eligible types yet.
+_FINANCIAL_ELIGIBLE_TYPES = frozenset({"price_determination_report"})
 
 # pdf_status values OCR is attempted for — a digitally-readable PDF
 # ("ok") never touches OCR; "malformed"/"unavailable" mean there's no
@@ -177,8 +184,24 @@ def process_disclosure_documents(
         observations if disclosure.document_type == "price_determination_report" else None,
     )
 
+    financial_observations: tuple[FinancialObservation, ...] = ()
+    if disclosure.document_type in _FINANCIAL_ELIGIBLE_TYPES:
+        financial_observations = extract_financial_observations_from_pages(
+            pages,
+            document_type=disclosure.document_type,
+            disclosure_id=disclosure.disclosure_id,
+            attachment_url=primary.url,
+            extraction_method=extraction_method,
+        )
+
     warnings = () if observations else ("no target fields matched in the extracted text",)
-    return replace(disclosure, **base_update, extracted_facts=facts, extraction_warnings=warnings)
+    return replace(
+        disclosure,
+        **base_update,
+        extracted_facts=facts,
+        financial_observations=financial_observations,
+        extraction_warnings=warnings,
+    )
 
 
 def aggregate_company_facts(disclosures: list[KapDisclosure]) -> dict[str, ExtractedFacts]:
@@ -233,3 +256,22 @@ def aggregate_company_facts(disclosures: list[KapDisclosure]) -> dict[str, Extra
         )
         for record_id in record_ids
     }
+
+
+def aggregate_company_financial_series(disclosures: list[KapDisclosure]) -> dict[str, tuple[FinancialObservation, ...]]:
+    """Collect every :class:`~halka_arz_advisor.kap.financials.FinancialObservation`
+    across a company's disclosures, grouped by ``matched_spk_record_id``.
+
+    Unlike :func:`aggregate_company_facts`, there's no priority rule or
+    conflict detection to apply here — a :class:`FinancialObservation`
+    is already keyed by ``(metric_name, period_start, period_end)``, so
+    two disclosures reporting the same period just both show up (kept,
+    not merged/deduplicated — never silently picking one over another).
+    Disclosures with no ``matched_spk_record_id`` are skipped.
+    """
+    by_record: dict[str, list[FinancialObservation]] = {}
+    for disclosure in disclosures:
+        if disclosure.matched_spk_record_id is None or not disclosure.financial_observations:
+            continue
+        by_record.setdefault(disclosure.matched_spk_record_id, []).extend(disclosure.financial_observations)
+    return {record_id: tuple(observations) for record_id, observations in by_record.items()}

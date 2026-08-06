@@ -17,6 +17,7 @@ from datetime import date, datetime
 from typing import Literal
 
 from ..kap.extraction import ExtractedFacts, FIELD_NAMES
+from ..kap.financials import FINANCIAL_METRIC_NAMES, FinancialObservation
 from ..kap.models import KapDisclosure
 from ..spk.application_list import SpkIpoApplicationRecord
 from ..spk.models import SpkIpoRecord
@@ -134,6 +135,7 @@ class CompanyDecisionInputs:
     application_record: SpkIpoApplicationRecord | None
     facts: ExtractedFacts | None
     disclosures: tuple[KapDisclosure, ...]
+    financial_observations: tuple[FinancialObservation, ...] = ()
 
 
 def _combine(statuses: list[FeatureStatus]) -> FeatureStatus:
@@ -245,6 +247,40 @@ def _resolve_kap_document_field(field_ref: str, document_type: str, inputs: Comp
     return "MISSING_DOCUMENT", FeatureEvidence(field_name=field_ref, value=None, status=note)
 
 
+def _resolve_financial_series_field(
+    field_ref: str, name: str, inputs: CompanyDecisionInputs, acceptable_sources: tuple[str, ...]
+) -> tuple[FeatureStatus, FeatureEvidence]:
+    if name not in FINANCIAL_METRIC_NAMES:
+        readable = any(_document_readable(doc_type, inputs.disclosures) for doc_type in acceptable_sources)
+        note = (
+            "no extractor implemented for this metric yet"
+            + ("; a readable source document does exist" if readable else "; no readable source document either")
+        )
+        return "MISSING_FIELD", FeatureEvidence(field_name=field_ref, value=None, status=note)
+
+    observations = tuple(obs for obs in inputs.financial_observations if obs.metric_name == name)
+    if not observations:
+        if any(_document_readable(doc_type, inputs.disclosures) for doc_type in acceptable_sources):
+            return "MISSING_FIELD", FeatureEvidence(field_name=field_ref, value=None, status="not_found")
+        return "MISSING_DOCUMENT", FeatureEvidence(
+            field_name=field_ref, value=None, status="no readable source document"
+        )
+
+    # Every explicitly labelled period found is kept as evidence — never
+    # collapsed to a single "the" value, since there isn't one (see
+    # halka_arz_advisor.kap.financials's module docstring).
+    first = observations[0]
+    return "AVAILABLE", FeatureEvidence(
+        field_name=field_ref,
+        value=tuple((obs.period_end, obs.value) for obs in observations),
+        status=f"{len(observations)} period(s) extracted",
+        disclosure_id=first.source.disclosure_id,
+        document_type=first.source.document_type,
+        page_number=first.source.page_number,
+        extraction_method=first.source.extraction_method,
+    )
+
+
 def _resolve_market_data_field(field_ref: str, name: str) -> tuple[FeatureStatus, FeatureEvidence]:
     return "MISSING_DOCUMENT", FeatureEvidence(
         field_name=field_ref, value=None, status="no external market-data source is implemented in this project"
@@ -261,6 +297,8 @@ def _resolve_field(field_ref: str, inputs: CompanyDecisionInputs, acceptable_sou
         return _resolve_spk_application_field(field_ref, name, inputs)
     if namespace == "kap_document":
         return _resolve_kap_document_field(field_ref, name, inputs)
+    if namespace == "financial_series":
+        return _resolve_financial_series_field(field_ref, name, inputs, acceptable_sources)
     if namespace == "market_data":
         return _resolve_market_data_field(field_ref, name)
     raise ValueError(f"unrecognized required_source_fields namespace in {field_ref!r}")

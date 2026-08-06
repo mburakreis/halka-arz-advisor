@@ -135,6 +135,64 @@ FEATURE_CATALOG: tuple[FeatureSpec, ...] = (
         availability_kind="direct",
     ),
     FeatureSpec(
+        feature_id="debt_to_equity",
+        category="fundamental_quality",
+        title="Borç/özkaynak oranı",
+        description=(
+            "financial_debt divided by equity for the most recent period both are reported for, requiring an "
+            "exact period, scope, currency, and scale match."
+        ),
+        required_source_fields=("derived_financial.debt_to_equity",),
+        acceptable_sources=("price_determination_report",),
+        offer_timing="pre_offer",
+        is_mandatory=False,
+        availability_kind="direct",
+    ),
+    FeatureSpec(
+        feature_id="current_ratio",
+        category="fundamental_quality",
+        title="Cari oran",
+        description=(
+            "current_assets divided by current_liabilities for the most recent period both are reported for — "
+            "not a meaningful concept for a company whose statement of financial position isn't presented in a "
+            "classified current/non-current format (see halka_arz_advisor.kap.sector)."
+        ),
+        required_source_fields=("derived_financial.current_ratio",),
+        acceptable_sources=("price_determination_report",),
+        offer_timing="pre_offer",
+        is_mandatory=False,
+        availability_kind="direct",
+    ),
+    FeatureSpec(
+        feature_id="operating_cash_flow_to_net_income",
+        category="fundamental_quality",
+        title="Faaliyet nakit akışı / net kâr oranı",
+        description=(
+            "A rough earnings-quality signal: operating_cash_flow divided by net_income for the most recent "
+            "period both are reported for."
+        ),
+        required_source_fields=("derived_financial.operating_cash_flow_to_net_income",),
+        acceptable_sources=("price_determination_report",),
+        offer_timing="pre_offer",
+        is_mandatory=False,
+        availability_kind="direct",
+    ),
+    FeatureSpec(
+        feature_id="interest_coverage",
+        category="fundamental_quality",
+        title="Faiz karşılama oranı",
+        description=(
+            "operating_profit divided by finance_expense for the most recent period both are reported for — "
+            "not a meaningful concept for a sector with no standard operating-profit line (see "
+            "halka_arz_advisor.kap.sector)."
+        ),
+        required_source_fields=("derived_financial.interest_coverage",),
+        acceptable_sources=("price_determination_report",),
+        offer_timing="pre_offer",
+        is_mandatory=False,
+        availability_kind="direct",
+    ),
+    FeatureSpec(
         feature_id="related_party_transactions_disclosure",
         category="fundamental_quality",
         title="İlişkili taraf işlemleri açıklaması",
@@ -254,6 +312,20 @@ FEATURE_CATALOG: tuple[FeatureSpec, ...] = (
         title="Fiyat tespit raporu net borç",
         description="Net debt, as explicitly stated in the price determination report.",
         required_source_fields=("kap_extraction.reported_net_debt",),
+        acceptable_sources=("price_determination_report",),
+        offer_timing="pre_offer",
+        is_mandatory=False,
+        availability_kind="direct",
+    ),
+    FeatureSpec(
+        feature_id="net_debt",
+        category="valuation",
+        title="Yeniden hesaplanan net borç",
+        description=(
+            "financial_debt minus cash_and_equivalents for the most recent period both are reported for — a "
+            "cross-check against reported_net_debt, not a substitute for it."
+        ),
+        required_source_fields=("derived_financial.net_debt",),
         acceptable_sources=("price_determination_report",),
         offer_timing="pre_offer",
         is_mandatory=False,

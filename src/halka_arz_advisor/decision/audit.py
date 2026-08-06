@@ -20,6 +20,7 @@ from ..kap.derived_financials import DERIVED_FINANCIAL_FEATURE_NAMES, compute_de
 from ..kap.extraction import ExtractedFacts, FIELD_NAMES
 from ..kap.financials import FINANCIAL_METRIC_NAMES, FinancialObservation
 from ..kap.models import KapDisclosure
+from ..kap.sector import SECTOR_INAPPLICABLE_METRICS, Sector, classify_sector
 from ..spk.application_list import SpkIpoApplicationRecord
 from ..spk.models import SpkIpoRecord
 from .catalog import get_feature
@@ -137,6 +138,16 @@ class CompanyDecisionInputs:
     facts: ExtractedFacts | None
     disclosures: tuple[KapDisclosure, ...]
     financial_observations: tuple[FinancialObservation, ...] = ()
+    # The company's registered legal name — used only for
+    # halka_arz_advisor.kap.sector's deterministic, name-based sector
+    # classification (never inferred from PDF text). Falls back to the
+    # first disclosure's own company_name when not given explicitly.
+    company_name: str | None = None
+
+    @property
+    def sector(self) -> Sector:
+        name = self.company_name or next((d.company_name for d in self.disclosures if d.company_name), None)
+        return classify_sector(name)
 
 
 def _combine(statuses: list[FeatureStatus]) -> FeatureStatus:
@@ -259,6 +270,11 @@ def _resolve_financial_series_field(
         )
         return "MISSING_FIELD", FeatureEvidence(field_name=field_ref, value=None, status=note)
 
+    if name in SECTOR_INAPPLICABLE_METRICS.get(inputs.sector, frozenset()):
+        return "NOT_APPLICABLE", FeatureEvidence(
+            field_name=field_ref, value=None, status=f"not a meaningful concept for sector={inputs.sector!r}"
+        )
+
     observations = tuple(obs for obs in inputs.financial_observations if obs.metric_name == name)
     if not observations:
         if any(_document_readable(doc_type, inputs.disclosures) for doc_type in acceptable_sources):
@@ -288,7 +304,7 @@ def _resolve_derived_financial_field(
     if name not in DERIVED_FINANCIAL_FEATURE_NAMES:
         return "MISSING_FIELD", FeatureEvidence(field_name=field_ref, value=None, status="no such derived financial feature")
 
-    derived = compute_derived_financial_features(inputs.financial_observations, inputs.facts)
+    derived = compute_derived_financial_features(inputs.financial_observations, inputs.facts, sector=inputs.sector)
     result = getattr(derived, name)
 
     if result.status == "computed":
@@ -297,6 +313,9 @@ def _resolve_derived_financial_field(
             value=result.value,
             status=f"computed (formula v{result.formula_version})",
         )
+
+    if result.status == "not_applicable":
+        return "NOT_APPLICABLE", FeatureEvidence(field_name=field_ref, value=None, status=result.unavailable_reason or "not applicable")
 
     # "unavailable" — distinguished the same way every other resolver
     # distinguishes "field genuinely missing" from "no source document

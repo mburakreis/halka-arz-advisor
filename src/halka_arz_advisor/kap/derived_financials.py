@@ -45,12 +45,31 @@ Strict comparison rules (per the brief):
 - ``reported_pe_difference_percentage`` compares ``recalculated_pe``
   against the report's own explicit ``reported_pe`` fact — unavailable
   whenever either side is.
+- ``net_debt`` = ``financial_debt`` - ``cash_and_equivalents``,
+  ``debt_to_equity`` = ``financial_debt`` / ``equity``, ``current_ratio``
+  = ``current_assets`` / ``current_liabilities``,
+  ``operating_cash_flow_to_net_income`` = ``operating_cash_flow`` /
+  ``net_income``, and ``interest_coverage`` = ``operating_profit`` /
+  ``finance_expense`` all follow the same rule as ``net_margin``: the
+  two input observations must share the exact same period, scope,
+  currency, and scale — never a different period, never a different
+  scope, never a different scale.
 
+A denominator that's zero, or negative where the ratio wouldn't be a
+meaningful one (equity, current liabilities, net income, finance
+expense — but not net_debt's/debt_to_equity's numerator, since a
+company legitimately can hold more cash than debt, or spend more than
+it earns), leaves the feature ``"unavailable"`` rather than computed.
 None of this annualizes an interim figure, combines consolidated and
-standalone observations, mixes inflation-adjusted and unadjusted
-periods, substitutes a sector-specific metric (e.g. written premiums)
-for revenue, or divides by a zero/negative denominator where the
-result wouldn't be a meaningful ratio.
+standalone observations, or mixes inflation-adjusted and unadjusted
+periods.
+
+Sector applicability (see :mod:`halka_arz_advisor.kap.sector`): a
+feature that depends on a metric a company's sector never reports in a
+comparable sense (e.g. ``net_margin`` for an insurer, which has no
+"revenue" concept) is reported ``"not_applicable"`` — a distinct status
+from ``"unavailable"``, since the gap here isn't a missing document or
+a failed extraction, it's that the concept itself doesn't apply.
 """
 
 from __future__ import annotations
@@ -60,16 +79,22 @@ from typing import Literal
 
 from .extraction import ExtractedFact, ExtractedFacts
 from .financials import FinancialObservation
+from .sector import Sector, SECTOR_INAPPLICABLE_DERIVED_FEATURES
 
 FORMULA_VERSION = "1"
 
-DerivedFeatureStatus = Literal["computed", "unavailable"]
+DerivedFeatureStatus = Literal["computed", "unavailable", "not_applicable"]
 
 DERIVED_FINANCIAL_FEATURE_NAMES: tuple[str, ...] = (
     "revenue_growth_yoy",
     "net_margin",
     "recalculated_pe",
     "reported_pe_difference_percentage",
+    "net_debt",
+    "debt_to_equity",
+    "current_ratio",
+    "operating_cash_flow_to_net_income",
+    "interest_coverage",
 )
 
 # See module docstring — the one currency/scale reported_post_money_market_cap
@@ -99,6 +124,11 @@ class DerivedFinancialFeatures:
     net_margin: DerivedFinancialFeature
     recalculated_pe: DerivedFinancialFeature
     reported_pe_difference_percentage: DerivedFinancialFeature
+    net_debt: DerivedFinancialFeature
+    debt_to_equity: DerivedFinancialFeature
+    current_ratio: DerivedFinancialFeature
+    operating_cash_flow_to_net_income: DerivedFinancialFeature
+    interest_coverage: DerivedFinancialFeature
 
     def as_dict(self) -> dict[str, DerivedFinancialFeature]:
         return {name: getattr(self, name) for name in DERIVED_FINANCIAL_FEATURE_NAMES}
@@ -155,6 +185,44 @@ def _computed(
     )
 
 
+def _not_applicable(feature_name: str, reason: str) -> DerivedFinancialFeature:
+    return DerivedFinancialFeature(
+        feature_name=feature_name,
+        status="not_applicable",
+        value=None,
+        unavailable_reason=reason,
+        input_observation_ids=(),
+        source_fact_ids=(),
+        formula_version=FORMULA_VERSION,
+    )
+
+
+def _latest_matching_pair(
+    numerator_metric: str, denominator_metric: str, observations: tuple[FinancialObservation, ...]
+) -> tuple[FinancialObservation, FinancialObservation] | None:
+    """The most recent (highest ``period_end``) pair of observations for
+    ``numerator_metric``/``denominator_metric`` sharing the exact same
+    period, consolidation scope, currency, scale, and inflation-
+    adjustment status — the "net_margin rule" shared by every two-metric
+    ratio in this module."""
+    numerators = [o for o in observations if o.metric_name == numerator_metric]
+    denominators = [o for o in observations if o.metric_name == denominator_metric]
+    pairs = [
+        (n, d)
+        for n in numerators
+        for d in denominators
+        if n.period_start == d.period_start
+        and n.period_end == d.period_end
+        and n.consolidation_scope == d.consolidation_scope
+        and n.currency == d.currency
+        and n.scale == d.scale
+        and n.inflation_adjusted == d.inflation_adjusted
+    ]
+    if not pairs:
+        return None
+    return max(pairs, key=lambda pair: pair[0].period_end)
+
+
 def compute_revenue_growth_yoy(observations: tuple[FinancialObservation, ...]) -> DerivedFinancialFeature:
     revenue = [o for o in observations if o.metric_name == "revenue" and o.period_type == "ANNUAL"]
     if not revenue:
@@ -188,34 +256,116 @@ def compute_revenue_growth_yoy(observations: tuple[FinancialObservation, ...]) -
 
 
 def compute_net_margin(observations: tuple[FinancialObservation, ...]) -> DerivedFinancialFeature:
-    revenues = [o for o in observations if o.metric_name == "revenue"]
-    net_incomes = [o for o in observations if o.metric_name == "net_income"]
-
-    pairs = [
-        (rev, ni)
-        for rev in revenues
-        for ni in net_incomes
-        if rev.period_start == ni.period_start
-        and rev.period_end == ni.period_end
-        and rev.consolidation_scope == ni.consolidation_scope
-        and rev.currency == ni.currency
-        and rev.scale == ni.scale
-        and rev.inflation_adjusted == ni.inflation_adjusted
-    ]
-    if not pairs:
+    pair = _latest_matching_pair("revenue", "net_income", observations)
+    if pair is None:
         return _unavailable(
             "net_margin",
             "no revenue/net_income observation pair sharing the exact same period, scope, currency, scale, "
             "and inflation-adjustment status",
         )
 
-    rev, ni = max(pairs, key=lambda pair: pair[0].period_end)
+    rev, ni = pair
     ids = (_observation_id(rev), _observation_id(ni))
     if rev.value == 0:
         return _unavailable("net_margin", "revenue is zero — margin is not meaningful", input_observation_ids=ids)
 
     value = ni.value / rev.value
     return _computed("net_margin", value, input_observation_ids=ids)
+
+
+def compute_net_debt(observations: tuple[FinancialObservation, ...]) -> DerivedFinancialFeature:
+    pair = _latest_matching_pair("financial_debt", "cash_and_equivalents", observations)
+    if pair is None:
+        return _unavailable(
+            "net_debt",
+            "no financial_debt/cash_and_equivalents observation pair sharing the exact same period, scope, "
+            "currency, scale, and inflation-adjustment status",
+        )
+
+    debt, cash = pair
+    ids = (_observation_id(debt), _observation_id(cash))
+    value = debt.value - cash.value
+    return _computed("net_debt", value, input_observation_ids=ids)
+
+
+def compute_debt_to_equity(observations: tuple[FinancialObservation, ...]) -> DerivedFinancialFeature:
+    pair = _latest_matching_pair("financial_debt", "equity", observations)
+    if pair is None:
+        return _unavailable(
+            "debt_to_equity",
+            "no financial_debt/equity observation pair sharing the exact same period, scope, currency, scale, "
+            "and inflation-adjustment status",
+        )
+
+    debt, equity = pair
+    ids = (_observation_id(debt), _observation_id(equity))
+    if equity.value <= 0:
+        return _unavailable("debt_to_equity", "equity is zero or negative — ratio is not meaningful", input_observation_ids=ids)
+
+    value = debt.value / equity.value
+    return _computed("debt_to_equity", value, input_observation_ids=ids)
+
+
+def compute_current_ratio(observations: tuple[FinancialObservation, ...]) -> DerivedFinancialFeature:
+    pair = _latest_matching_pair("current_assets", "current_liabilities", observations)
+    if pair is None:
+        return _unavailable(
+            "current_ratio",
+            "no current_assets/current_liabilities observation pair sharing the exact same period, scope, "
+            "currency, scale, and inflation-adjustment status",
+        )
+
+    assets, liabilities = pair
+    ids = (_observation_id(assets), _observation_id(liabilities))
+    if liabilities.value <= 0:
+        return _unavailable(
+            "current_ratio", "current liabilities is zero or negative — ratio is not meaningful", input_observation_ids=ids
+        )
+
+    value = assets.value / liabilities.value
+    return _computed("current_ratio", value, input_observation_ids=ids)
+
+
+def compute_operating_cash_flow_to_net_income(observations: tuple[FinancialObservation, ...]) -> DerivedFinancialFeature:
+    pair = _latest_matching_pair("operating_cash_flow", "net_income", observations)
+    if pair is None:
+        return _unavailable(
+            "operating_cash_flow_to_net_income",
+            "no operating_cash_flow/net_income observation pair sharing the exact same period, scope, currency, "
+            "scale, and inflation-adjustment status",
+        )
+
+    cash_flow, net_income = pair
+    ids = (_observation_id(cash_flow), _observation_id(net_income))
+    if net_income.value <= 0:
+        return _unavailable(
+            "operating_cash_flow_to_net_income",
+            "net income is zero or negative — ratio is not meaningful",
+            input_observation_ids=ids,
+        )
+
+    value = cash_flow.value / net_income.value
+    return _computed("operating_cash_flow_to_net_income", value, input_observation_ids=ids)
+
+
+def compute_interest_coverage(observations: tuple[FinancialObservation, ...]) -> DerivedFinancialFeature:
+    pair = _latest_matching_pair("operating_profit", "finance_expense", observations)
+    if pair is None:
+        return _unavailable(
+            "interest_coverage",
+            "no operating_profit/finance_expense observation pair sharing the exact same period, scope, "
+            "currency, scale, and inflation-adjustment status",
+        )
+
+    operating_profit, finance_expense = pair
+    ids = (_observation_id(operating_profit), _observation_id(finance_expense))
+    if finance_expense.value <= 0:
+        return _unavailable(
+            "interest_coverage", "finance expense is zero or negative — coverage ratio is not meaningful", input_observation_ids=ids
+        )
+
+    value = operating_profit.value / finance_expense.value
+    return _computed("interest_coverage", value, input_observation_ids=ids)
 
 
 def compute_recalculated_pe(
@@ -306,11 +456,35 @@ def compute_reported_pe_difference_percentage(
 
 
 def compute_derived_financial_features(
-    observations: tuple[FinancialObservation, ...], facts: ExtractedFacts | None
+    observations: tuple[FinancialObservation, ...],
+    facts: ExtractedFacts | None,
+    sector: Sector = "unknown",
 ) -> DerivedFinancialFeatures:
-    return DerivedFinancialFeatures(
+    """Compute every derived feature, then override any this
+    ``sector`` doesn't support (see
+    :data:`halka_arz_advisor.kap.sector.SECTOR_INAPPLICABLE_DERIVED_FEATURES`)
+    with ``"not_applicable"`` — checked after computing, not instead of,
+    so the override always wins regardless of what the data alone would
+    have produced."""
+    computed = DerivedFinancialFeatures(
         revenue_growth_yoy=compute_revenue_growth_yoy(observations),
         net_margin=compute_net_margin(observations),
         recalculated_pe=compute_recalculated_pe(observations, facts),
         reported_pe_difference_percentage=compute_reported_pe_difference_percentage(observations, facts),
+        net_debt=compute_net_debt(observations),
+        debt_to_equity=compute_debt_to_equity(observations),
+        current_ratio=compute_current_ratio(observations),
+        operating_cash_flow_to_net_income=compute_operating_cash_flow_to_net_income(observations),
+        interest_coverage=compute_interest_coverage(observations),
     )
+
+    inapplicable = SECTOR_INAPPLICABLE_DERIVED_FEATURES.get(sector, frozenset())
+    if not inapplicable:
+        return computed
+
+    overrides = {
+        name: _not_applicable(name, f"not a meaningful concept for sector={sector!r}")
+        for name in DERIVED_FINANCIAL_FEATURE_NAMES
+        if name in inapplicable
+    }
+    return DerivedFinancialFeatures(**{**computed.as_dict(), **overrides})

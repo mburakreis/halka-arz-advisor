@@ -55,6 +55,62 @@ commit: neither sample report carries an unambiguous, table-adjacent
 label for it (a same-page "ÖBDR" row marker was observed in METEN's
 table but its meaning couldn't be confirmed from the (partially
 garbled) extracted text, so it's not treated as reliable evidence).
+
+Extended to also read the "Bilanço" (balance sheet) table — the same
+heading+period-header+labelled-row shape as "Gelir Tablosu", confirmed
+on the same two reports (METEN page 22, QUICK page 67-68):
+
+- cash_and_equivalents ("Nakit ve Benzerleri" / "Nakit ve Nakit
+  Benzeri(leri)" — both real, confirmed, values match on both reports).
+- current_assets ("Dönen Varlıklar" / "Cari Varlıklar" — synonyms;
+  QUICK's insurance-specific balance sheet uses "Cari Varlıklar" for
+  the identical concept, not a different one — confirmed by wording in
+  METEN's table; QUICK's own table has a *different*, unrelated OCR
+  corruption on this specific label ("VARLIKLAR" rendered with a stray
+  internal space, "V ARLIKLAR") that isn't matched, a genuine PDF-text
+  quality gap rather than a design choice).
+- current_liabilities ("Kısa Vad(eli) Yükümlülükler") — confirmed
+  clean on QUICK; METEN's own table has a distinct OCR corruption on
+  this one label ("Yükümlülükler" rendered "Y k ml l kler", missing
+  every "ü" and space-fragmented) that isn't matched either — again a
+  real PDF-quality gap on that specific page, not a regex design flaw.
+- equity ("Ana Ortak(lığa) Özkaynak(ları)" / "Özsermaye" — synonyms;
+  confirmed on both. **Not** the bare "Özkaynaklar" row METEN's table
+  also has — cross-checked against that report's own narrative text
+  ("Şirket'in özkaynakları ... 5,4 milyar TL") and independently
+  against a second summary table elsewhere in the same report, both of
+  which match "Ana Ortak. Özkaynakları", not the bare "Özkaynaklar"
+  row (a different, smaller subtotal whose exact meaning couldn't be
+  confirmed from the available text).
+- financial_debt ("Finansal Borç(lar)") — the label wording is
+  confirmed real (it appears in a single-period valuation snapshot
+  elsewhere in METEN's own report), but neither sample's *multi-period*
+  Bilanço table states a single combined total for it (only fragmented
+  short-term/long-term sub-components, and summing sub-components
+  would be calculating a value rather than extracting one) — this
+  extractor is validated against the table-parsing machinery itself,
+  not a live match in either sample; it activates for a report that
+  does state this total directly.
+
+Also reads operating_profit ("EBIT") and finance_expense ("Fin. Gid.")
+from the "Gelir Tablosu" table (both confirmed on METEN; QUICK's
+insurance-specific income statement has no comparable "EBIT" line at
+all — see :mod:`halka_arz_advisor.kap.sector`), and
+operating_cash_flow from a "Nakit Akış Tablosu" (statement of cash
+flows) — neither sample report includes one at all (a DCF-based price
+determination report projects *future* cash flows rather than
+restating historical ones), so this extractor is, like
+financial_debt, validated by the same table-parsing machinery and
+label wording rather than a live match.
+
+Row values may now be negative (parenthesized, e.g. a quarter's
+"EBIT" was a real operating loss in one sample: "(41.387.392)") — see
+:data:`_SIGNED_NUM`/:func:`_parse_signed_turkish_number`. Its lookbehind
+also guards against a real, confirmed OCR artifact in QUICK's more
+heavily garbled PDF text: a Turkish "ı" is sometimes misread as the
+digit "1" *inside* a word (e.g. "Varlıklar" -> "Varl1klar"), which
+would otherwise be picked up as a spurious stray one-digit "value"
+immediately before the row's real numbers.
 """
 
 from __future__ import annotations
@@ -73,7 +129,18 @@ from .text import fold_turkish
 FinancialPeriodType = Literal["ANNUAL", "INTERIM", "UNKNOWN"]
 ConsolidationScope = Literal["consolidated", "standalone"]
 
-FINANCIAL_METRIC_NAMES: tuple[str, ...] = ("revenue", "net_income")
+FINANCIAL_METRIC_NAMES: tuple[str, ...] = (
+    "revenue",
+    "net_income",
+    "cash_and_equivalents",
+    "financial_debt",
+    "equity",
+    "current_assets",
+    "current_liabilities",
+    "operating_profit",
+    "operating_cash_flow",
+    "finance_expense",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,10 +173,14 @@ class FinancialSeries:
 
 
 # --------------------------------------------------------------------------
-# "Gelir Tablosu" (income statement) table parsing
+# "Gelir Tablosu" (income statement) / "Bilanço" (balance sheet) /
+# "Nakit Akış Tablosu" (cash flow statement) table parsing — all three
+# share the same heading+period-header+labelled-row shape.
 # --------------------------------------------------------------------------
 
 _GELIR_TABLOSU_HEADING = "gelir tablosu"
+_BILANCO_HEADING = "bilanco"
+_NAKIT_AKIS_HEADING = "nakit akis tablosu"
 
 # How far past the heading to look for the table's own period-header row
 # — generous enough to cover every header row/currency marker observed
@@ -131,6 +202,33 @@ _PERIOD_TOKEN_RE = re.compile(r"(\d{4})/(\d{1,2})(?!\d)|(?<!\d)(\d{4})(?!\d)(?![
 
 _NUM = r"\d{1,3}(?:\.\d{3})*(?:,\d+)?"  # Turkish-formatted number, matches kap.extraction's own _NUM
 
+# Like _NUM, but also accepts a parenthesized or minus-signed value as
+# negative (e.g. "(41.387.392)", a real operating loss observed in one
+# sample's "EBIT" row) — never assumed for revenue/net_income, which
+# have only ever been observed stated as plain positive magnitudes, but
+# needed for operating_profit/finance_expense and any other row that
+# can legitimately go negative. The leading negative lookbehind guards
+# against a confirmed OCR artifact: a Turkish "ı" misread as digit "1"
+# *inside* a word (e.g. "Varlıklar" -> "Varl1klar") would otherwise be
+# picked up as a spurious stray value immediately preceding a row's
+# real numbers — requiring the match not be preceded by a letter rules
+# that out.
+_SIGNED_NUM = r"(?<![a-zA-Z])\(?-?\d{1,3}(?:\.\d{3})*(?:,\d+)?\)?"
+
+# Which table each metric is read from.
+_METRIC_HEADINGS: dict[str, str] = {
+    "revenue": _GELIR_TABLOSU_HEADING,
+    "net_income": _GELIR_TABLOSU_HEADING,
+    "operating_profit": _GELIR_TABLOSU_HEADING,
+    "finance_expense": _GELIR_TABLOSU_HEADING,
+    "cash_and_equivalents": _BILANCO_HEADING,
+    "financial_debt": _BILANCO_HEADING,
+    "equity": _BILANCO_HEADING,
+    "current_assets": _BILANCO_HEADING,
+    "current_liabilities": _BILANCO_HEADING,
+    "operating_cash_flow": _NAKIT_AKIS_HEADING,
+}
+
 _METRIC_ROW_LABEL_PATTERNS: dict[str, tuple[str, ...]] = {
     # "Net Satışlar" (METEN) — QUICK, an insurance holding, has no
     # comparable line (insurers report written premiums, a different
@@ -140,6 +238,36 @@ _METRIC_ROW_LABEL_PATTERNS: dict[str, tuple[str, ...]] = {
     # in this order, first match wins, same fallback convention used
     # throughout kap.extraction (e.g. extract_offering_price).
     "net_income": (r"net\s+kar\b", r"net\s+donem\s+kari"),
+    # "Nakit ve Benzerleri" (METEN) / "Nakit ve Nakit Benzeri(leri)
+    # Varlıkları" (QUICK) — both confirmed real.
+    "cash_and_equivalents": (r"nakit\s+ve\s+(?:nakit\s+)?benzer\w*",),
+    # See module docstring — label wording confirmed real elsewhere in
+    # a sample report, but not as a multi-period Bilanço total.
+    "financial_debt": (r"\bfinansal\s+borc\w*\b",),
+    # "Ana Ortak. Özkaynakları" (METEN, confirmed — see module
+    # docstring for why *not* the bare "Özkaynaklar" row) / "Özsermaye"
+    # (QUICK, confirmed) — synonyms for the same concept, tried in
+    # this order.
+    "equity": (r"ana\s+ortak\w*\.?\s+ozkaynak\w*", r"\bozsermaye\b"),
+    # "Dönen Varlıklar" (METEN) / "Cari Varlıklar" (QUICK) — synonyms
+    # for the same concept (both real, confirmed), not two different
+    # ones.
+    "current_assets": (r"(?:donen|cari)\s+varlik\w*",),
+    # "Kısa Vad(eli) Yükümlülükler" — identical wording confirmed on
+    # both reports.
+    "current_liabilities": (r"kisa\s+vad\w*\.?\s+yukumluluk\w*",),
+    # "EBIT" (METEN, confirmed) — the trailing word boundary excludes
+    # "EBITDA" (a different, earlier row in the same table) by
+    # construction, since "t" and "d" are both word characters with no
+    # boundary between them.
+    "operating_profit": (r"\bebit\b",),
+    # Standard Turkish CFS terminology — see module docstring; not a
+    # live match in either sample.
+    "operating_cash_flow": (r"isletme\s+faaliyetlerinden\s+(?:elde\s+edilen\s+)?nakit\w*",),
+    # "Fin. Gid." (METEN, confirmed literal label; see module docstring
+    # for the residual interpretive uncertainty around surrounding
+    # context in that specific sample).
+    "finance_expense": (r"\bfin\.?\s+gid\w*\b",),
 }
 
 
@@ -190,6 +318,21 @@ def _parse_turkish_number(raw: str) -> float | None:
         return None
 
 
+def _parse_signed_turkish_number(raw: str) -> float | None:
+    """Like :func:`_parse_turkish_number`, but ``"(41.387.392)"`` or
+    ``"-41.387.392"`` -> ``-41387392.0``."""
+    cleaned = raw.strip()
+    negative = cleaned.startswith("(") and cleaned.endswith(")")
+    cleaned = cleaned.strip("()")
+    if cleaned.startswith("-"):
+        negative = True
+        cleaned = cleaned[1:]
+    value = _parse_turkish_number(cleaned)
+    if value is None:
+        return None
+    return -value if negative else value
+
+
 @dataclass(frozen=True, slots=True)
 class _RowValue:
     value: float
@@ -203,9 +346,11 @@ def _extract_metric_row(
     folded: str, text: str, metric_name: str
 ) -> tuple[list[_RowValue], str, str, ConsolidationScope | None] | None:
     """``(row_values, currency, scale, consolidation_scope)`` for
-    ``metric_name``'s "Gelir Tablosu" row on this page, or ``None`` if
-    the table/row/scale marker isn't present here."""
-    heading_idx = folded.find(_GELIR_TABLOSU_HEADING)
+    ``metric_name``'s row in its table (see :data:`_METRIC_HEADINGS`)
+    on this page, or ``None`` if the table/row/scale marker isn't
+    present here."""
+    heading = _METRIC_HEADINGS[metric_name]
+    heading_idx = folded.find(heading)
     if heading_idx == -1:
         return None
 
@@ -229,14 +374,14 @@ def _extract_metric_row(
 
     label_end = heading_idx + label_match.end()
     row_window = folded[label_end : label_end + _ROW_VALUE_WINDOW_CHARS]
-    number_matches = list(re.finditer(_NUM, row_window))
+    number_matches = list(re.finditer(_SIGNED_NUM, row_window))
     if len(number_matches) < len(periods):
         return None
 
     row_values = []
     for (period_type, start, end), number_match in zip(periods, number_matches[: len(periods)]):
         raw = text[label_end + number_match.start() : label_end + number_match.end()]
-        value = _parse_turkish_number(raw)
+        value = _parse_signed_turkish_number(raw)
         if value is None:
             return None
         row_values.append(_RowValue(value, period_type, start, end, raw))
@@ -253,8 +398,9 @@ def extract_financial_observations_from_pages(
     attachment_url: str,
     extraction_method: ExtractionMethod = "digital",
 ) -> tuple[FinancialObservation, ...]:
-    """Run every metric's "Gelir Tablosu" row extractor over ``pages``,
-    keeping the *first* page each metric's table is found on (mirrors
+    """Run every metric's table-row extractor (see :data:`_METRIC_HEADINGS`)
+    over ``pages``, keeping the *first* page each metric's table is found
+    on (mirrors
     :func:`halka_arz_advisor.kap.extraction.extract_observations_from_pages`'s
     first-match-wins convention) — one :class:`FinancialObservation`
     per explicitly labelled period found for that metric."""

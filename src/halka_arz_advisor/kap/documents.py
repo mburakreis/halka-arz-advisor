@@ -41,6 +41,7 @@ def process_disclosure_documents(
     config: ProbeConfig | None = None,
     client: httpx.Client | None = None,
     cache: PdfCache | None = None,
+    cache_only: bool = False,
 ) -> KapDisclosure:
     """Resolve attachments, download+parse the primary one, and (for
     prospectus/announcement disclosures) extract fields — returning an
@@ -52,6 +53,14 @@ def process_disclosure_documents(
     dropped. A hard KAP API failure resolving attachments (transport,
     bad response, schema mismatch) does propagate, same as everywhere
     else in this project.
+
+    Attachment *metadata* (which attachments exist, their objId) is
+    always resolved live — that's a small JSON call, not a document
+    download. If ``cache_only`` is set, the PDF itself is only ever read
+    from ``cache``; a cache miss is reported as ``pdf_status="unavailable"``
+    rather than triggering a download (used by the Ollama analysis layer,
+    which must only analyze documents an earlier ``--parse-documents``
+    run already cached).
     """
     if disclosure.disclosure_index is None:
         return replace(
@@ -85,6 +94,7 @@ def process_disclosure_documents(
         config=config,
         client=client,
         cache=cache,
+        cache_only=cache_only,
     )
 
     base_update = {

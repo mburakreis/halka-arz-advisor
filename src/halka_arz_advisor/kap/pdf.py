@@ -120,6 +120,7 @@ def download_pdf(
     cache: PdfCache | None = None,
     max_bytes: int = DEFAULT_MAX_PDF_BYTES,
     timeout_seconds: float = DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
+    cache_only: bool = False,
 ) -> PdfDownloadResult:
     """Download one attachment, unwrap it, and validate it's a real PDF.
 
@@ -129,12 +130,25 @@ def download_pdf(
     pre-rejecting) and an explicit ``timeout_seconds`` for the download,
     separate from the shorter default read timeout used for small JSON
     API calls elsewhere in the project (attachments can be tens of MB).
+
+    If ``cache_only`` is set, a cache miss is reported as
+    ``"unavailable"`` immediately — no network request is made. Used by
+    the Ollama analysis layer, which must only ever analyze documents
+    already downloaded by a prior ``--parse-documents`` run.
     """
     if cache is not None:
         cached = cache.get(obj_id)
         if cached is not None:
             status: PdfStatus = "ok" if cached.startswith(b"%PDF-") else "malformed"
             return PdfDownloadResult(status=status, content=cached, error=None, from_cache=True)
+
+    if cache_only:
+        return PdfDownloadResult(
+            status="unavailable",
+            content=None,
+            error="not in cache (cache_only mode: KAP documents are not re-downloaded)",
+            from_cache=False,
+        )
 
     cfg = config or ProbeConfig()
     owns_client = client is None
@@ -290,6 +304,7 @@ def fetch_and_read_pdf(
     cache: PdfCache | None = None,
     max_bytes: int = DEFAULT_MAX_PDF_BYTES,
     timeout_seconds: float = DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
+    cache_only: bool = False,
 ) -> PdfFetchResult:
     """Download (or read from cache) one attachment and extract its text."""
     download = download_pdf(
@@ -301,6 +316,7 @@ def fetch_and_read_pdf(
         cache=cache,
         max_bytes=max_bytes,
         timeout_seconds=timeout_seconds,
+        cache_only=cache_only,
     )
     if download.status != "ok" or download.content is None:
         return PdfFetchResult(status=download.status, pages=(), error=download.error, from_cache=download.from_cache)

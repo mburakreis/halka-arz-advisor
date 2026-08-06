@@ -14,7 +14,7 @@ package itself — the GitHub Actions integration lives in the workflow
 YAML and calls the same CLI script used locally.
 """
 
-from .analysis import analyze_company, compute_document_content_hash, verify_gemini_ready
+from .analysis import analyze_company, compute_document_content_hash, lookup_analysis, verify_gemini_ready
 from .cache import AnalysisCache, compute_cache_key
 from .client import GeminiClient
 from .config import GeminiConfig, load_gemini_config_from_env
@@ -32,6 +32,7 @@ from .schema import ANALYSIS_JSON_SCHEMA, PARTICIPATION_SIGNAL_VALUES, AnalysisO
 
 __all__ = [
     "analyze_company",
+    "lookup_analysis",
     "verify_gemini_ready",
     "compute_document_content_hash",
     "AnalysisCache",

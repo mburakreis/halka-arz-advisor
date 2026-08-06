@@ -61,6 +61,54 @@ def compute_document_content_hash(*, facts: ExtractedFacts, sections: list[Conte
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _insufficient_data_record(spk_record_id: str, model_name: str) -> AnalysisRecord:
+    return AnalysisRecord(
+        spk_record_id=spk_record_id,
+        llm_status="insufficient_data",
+        llm_model=model_name,
+        llm_analysis=None,
+        llm_warnings=("no extractable PDF text available in the cache for this company's documents",),
+        analyzed_at=datetime.now(UTC),
+    )
+
+
+def lookup_analysis(
+    *,
+    spk_record_id: str,
+    facts: ExtractedFacts,
+    disclosures: list[KapDisclosure],
+    pdf_cache: PdfCache,
+    analysis_cache: AnalysisCache,
+    model_name: str,
+    max_total_chars: int = DEFAULT_MAX_TOTAL_CHARS,
+) -> AnalysisRecord | None:
+    """Look up the most recently produced analysis for one company
+    *without* ever calling Gemini — for tooling (e.g.
+    ``scripts/send_pending_analyses.py``) that only wants to know what's
+    already been analyzed, not trigger new analysis.
+
+    Mirrors :func:`analyze_company`'s own cache-key derivation exactly,
+    so it finds precisely the record a matching :func:`analyze_company`
+    call would have produced or reused. Returns ``None`` on a genuine
+    cache miss (nothing analyzed yet for this exact input) — as opposed
+    to an ``"insufficient_data"`` result, which (matching
+    :func:`analyze_company`) is synthesized fresh here too, since that
+    status is never itself written to ``analysis_cache``.
+    """
+    sections = select_context_sections(disclosures, pdf_cache, max_total_chars=max_total_chars)
+    if not sections:
+        return _insufficient_data_record(spk_record_id, model_name)
+
+    content_hash = compute_document_content_hash(facts=facts, sections=sections)
+    cache_key = compute_cache_key(
+        document_content_hash=content_hash,
+        model_name=model_name,
+        prompt_version=PROMPT_VERSION,
+        schema_version=SCHEMA_VERSION,
+    )
+    return analysis_cache.get(cache_key)
+
+
 def analyze_company(
     *,
     spk_record_id: str,
@@ -90,14 +138,7 @@ def analyze_company(
     sections = select_context_sections(disclosures, pdf_cache, max_total_chars=max_total_chars)
 
     if not sections:
-        return AnalysisRecord(
-            spk_record_id=spk_record_id,
-            llm_status="insufficient_data",
-            llm_model=gemini_client.model_name,
-            llm_analysis=None,
-            llm_warnings=("no extractable PDF text available in the cache for this company's documents",),
-            analyzed_at=datetime.now(UTC),
-        )
+        return _insufficient_data_record(spk_record_id, gemini_client.model_name)
 
     content_hash = compute_document_content_hash(facts=facts, sections=sections)
     cache_key = compute_cache_key(

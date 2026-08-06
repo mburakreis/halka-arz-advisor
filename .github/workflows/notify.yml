@@ -65,14 +65,29 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: uv run python scripts/analyze_pending_ipos.py > /dev/null
 
+      - name: Send pending Gemini analysis notifications
+        # Same protection as the analysis step above: a temporary
+        # Telegram failure must not fail the workflow.
+        # send_pending_analyses.py only records a company as sent (in
+        # state/sent_analyses.json) *after* a successful delivery, and
+        # that file is only committed below once the script has
+        # finished — so a failed send simply leaves that company unsent
+        # for the next hourly run to retry, and nothing gets committed
+        # until delivery actually succeeded.
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: uv run python scripts/send_pending_analyses.py --state-file state/sent_analyses.json
+
       - name: Commit updated state
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add state/seen_records.json
+          git add state/seen_records.json state/sent_analyses.json
           if git diff --cached --quiet; then
             echo "No state changes to commit."
           else
-            git commit -m "chore: update seen IPO records state"
+            git commit -m "chore: update seen IPO records and sent-analysis state"
             git push
           fi

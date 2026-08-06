@@ -17,3 +17,10 @@ wheels/
 /data/probe-results/*
 !/data/raw/.gitkeep
 !/data/probe-results/.gitkeep
+
+# Local notification state (which records we've already notified about)
+/data/state/*
+!/data/state/.gitkeep
+
+# Secrets
+.env

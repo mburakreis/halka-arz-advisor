@@ -33,6 +33,13 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: uv run python scripts/check_and_notify.py --state-file state/seen_records.json
 
+      # actions/cache's post-job save step needs both paths to exist —
+      # normally guaranteed by the fetch/analysis steps below writing at
+      # least one file, but not on a run that matches/analyzes nothing
+      # (e.g. no KAP disclosures at all in the lookback window).
+      - name: Ensure cache directories exist
+        run: mkdir -p data/cache/kap_pdfs data/cache/llm_analysis
+
       # KAP PDFs and Gemini analysis results are pure caches (like the
       # rest of data/cache/*, gitignored — see .gitignore), not
       # notification state, so they persist across runs via the
@@ -81,10 +88,19 @@ jobs:
         run: uv run python scripts/send_pending_analyses.py --state-file state/sent_analyses.json
 
       - name: Commit updated state
+        # Both state files are optional at this point: send_pending_analyses.py
+        # (like analyze_pending_ipos.py before it) can return early — a
+        # missing GEMINI_API_KEY/TELEGRAM_BOT_TOKEN, a KAP/SPK fetch
+        # failure — before ever writing its state file, so
+        # state/sent_analyses.json (and, in principle, state/seen_records.json)
+        # may not exist yet. `git add` on a nonexistent path exits non-zero
+        # and would abort this step under bash's default `-e`, so each is
+        # only added if present.
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add state/seen_records.json state/sent_analyses.json
+          [ -f state/seen_records.json ] && git add state/seen_records.json
+          [ -f state/sent_analyses.json ] && git add state/sent_analyses.json
           if git diff --cached --quiet; then
             echo "No state changes to commit."
           else

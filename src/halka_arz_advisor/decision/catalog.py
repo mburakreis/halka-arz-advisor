@@ -33,6 +33,13 @@ which existing model they'd read from:
   collected for the company (any explicitly labelled period counts;
   see that module's docstring) — never a single scalar, since a metric
   is reported for several comparable periods at once.
+- ``derived_financial.<feature_name>`` — one feature in
+  :data:`halka_arz_advisor.kap.derived_financials.DERIVED_FINANCIAL_FEATURE_NAMES`,
+  a value computed (not extracted) from ``financial_series``/``kap_extraction``
+  data under strict comparison rules — resolves ``DERIVABLE`` when the
+  formula could be computed, ``MISSING_FIELD``/``MISSING_DOCUMENT``
+  when its inputs were missing or incompatible (see that module's
+  docstring for exactly what "incompatible" means per feature).
 - ``market_data.<name>`` — no corresponding model exists in this
   project at all (a genuine, currently out-of-scope data source, e.g.
   a peer/index feed) — always evaluates to ``MISSING_DOCUMENT``.
@@ -97,6 +104,34 @@ FEATURE_CATALOG: tuple[FeatureSpec, ...] = (
         acceptable_sources=("price_determination_report",),
         offer_timing="pre_offer",
         is_mandatory=True,
+        availability_kind="direct",
+    ),
+    FeatureSpec(
+        feature_id="revenue_growth_yoy",
+        category="fundamental_quality",
+        title="Yıllık gelir büyümesi",
+        description=(
+            "Year-over-year revenue growth between the two most recent comparable ANNUAL periods "
+            "(same consolidation scope, currency, scale, and inflation-adjustment status)."
+        ),
+        required_source_fields=("derived_financial.revenue_growth_yoy",),
+        acceptable_sources=("price_determination_report",),
+        offer_timing="pre_offer",
+        is_mandatory=False,
+        availability_kind="direct",
+    ),
+    FeatureSpec(
+        feature_id="net_margin",
+        category="fundamental_quality",
+        title="Net kar marjı",
+        description=(
+            "Net income divided by revenue for the most recent period both are reported for, requiring an "
+            "exact period, scope, currency, and scale match."
+        ),
+        required_source_fields=("derived_financial.net_margin",),
+        acceptable_sources=("price_determination_report",),
+        offer_timing="pre_offer",
+        is_mandatory=False,
         availability_kind="direct",
     ),
     FeatureSpec(
@@ -263,6 +298,31 @@ FEATURE_CATALOG: tuple[FeatureSpec, ...] = (
         title="Halka arz iskonto oranı",
         description="The discount applied between the calculated fair value and the actual offering price, as explicitly stated in the price determination report.",
         required_source_fields=("kap_extraction.headline_discount_percentage",),
+        acceptable_sources=("price_determination_report",),
+        offer_timing="pre_offer",
+        is_mandatory=False,
+        availability_kind="direct",
+    ),
+    FeatureSpec(
+        feature_id="recalculated_pe",
+        category="valuation",
+        title="Yeniden hesaplanan F/K",
+        description=(
+            "reported_post_money_market_cap divided by the latest eligible full-year annual net income — "
+            "a cross-check against the report's own stated P/E, not a substitute for it."
+        ),
+        required_source_fields=("derived_financial.recalculated_pe",),
+        acceptable_sources=("price_determination_report",),
+        offer_timing="pre_offer",
+        is_mandatory=False,
+        availability_kind="direct",
+    ),
+    FeatureSpec(
+        feature_id="reported_pe_difference_percentage",
+        category="valuation",
+        title="Rapor F/K farkı (%)",
+        description="Percentage difference between recalculated_pe and the report's own explicitly stated reported_pe.",
+        required_source_fields=("derived_financial.reported_pe_difference_percentage",),
         acceptable_sources=("price_determination_report",),
         offer_timing="pre_offer",
         is_mandatory=False,

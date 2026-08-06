@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Literal
 
+from ..kap.derived_financials import DERIVED_FINANCIAL_FEATURE_NAMES, compute_derived_financial_features
 from ..kap.extraction import ExtractedFacts, FIELD_NAMES
 from ..kap.financials import FINANCIAL_METRIC_NAMES, FinancialObservation
 from ..kap.models import KapDisclosure
@@ -281,6 +282,32 @@ def _resolve_financial_series_field(
     )
 
 
+def _resolve_derived_financial_field(
+    field_ref: str, name: str, inputs: CompanyDecisionInputs, acceptable_sources: tuple[str, ...]
+) -> tuple[FeatureStatus, FeatureEvidence]:
+    if name not in DERIVED_FINANCIAL_FEATURE_NAMES:
+        return "MISSING_FIELD", FeatureEvidence(field_name=field_ref, value=None, status="no such derived financial feature")
+
+    derived = compute_derived_financial_features(inputs.financial_observations, inputs.facts)
+    result = getattr(derived, name)
+
+    if result.status == "computed":
+        return "DERIVABLE", FeatureEvidence(
+            field_name=field_ref,
+            value=result.value,
+            status=f"computed (formula v{result.formula_version})",
+        )
+
+    # "unavailable" — distinguished the same way every other resolver
+    # distinguishes "field genuinely missing" from "no source document
+    # was even readable" (see _resolve_kap_extraction_field).
+    if any(_document_readable(doc_type, inputs.disclosures) for doc_type in acceptable_sources):
+        return "MISSING_FIELD", FeatureEvidence(field_name=field_ref, value=None, status=result.unavailable_reason or "unavailable")
+    return "MISSING_DOCUMENT", FeatureEvidence(
+        field_name=field_ref, value=None, status=result.unavailable_reason or "unavailable"
+    )
+
+
 def _resolve_market_data_field(field_ref: str, name: str) -> tuple[FeatureStatus, FeatureEvidence]:
     return "MISSING_DOCUMENT", FeatureEvidence(
         field_name=field_ref, value=None, status="no external market-data source is implemented in this project"
@@ -299,6 +326,8 @@ def _resolve_field(field_ref: str, inputs: CompanyDecisionInputs, acceptable_sou
         return _resolve_kap_document_field(field_ref, name, inputs)
     if namespace == "financial_series":
         return _resolve_financial_series_field(field_ref, name, inputs, acceptable_sources)
+    if namespace == "derived_financial":
+        return _resolve_derived_financial_field(field_ref, name, inputs, acceptable_sources)
     if namespace == "market_data":
         return _resolve_market_data_field(field_ref, name)
     raise ValueError(f"unrecognized required_source_fields namespace in {field_ref!r}")

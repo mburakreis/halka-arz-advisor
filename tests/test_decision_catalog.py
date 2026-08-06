@@ -1,7 +1,15 @@
 from halka_arz_advisor.decision.catalog import FEATURE_CATALOG, get_feature
 from halka_arz_advisor.decision.models import CATEGORIES
 
-_VALID_NAMESPACES = ("kap_extraction", "spk_ipo_record", "spk_application", "kap_document", "financial_series", "market_data")
+_VALID_NAMESPACES = (
+    "kap_extraction",
+    "spk_ipo_record",
+    "spk_application",
+    "kap_document",
+    "financial_series",
+    "derived_financial",
+    "market_data",
+)
 
 
 def test_no_duplicate_feature_ids_and_valid_categories():

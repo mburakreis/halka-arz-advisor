@@ -22,8 +22,16 @@ import httpx
 
 from ..probe.config import ProbeConfig
 from .attachments import resolve_attachments, select_primary_attachment
-from .extraction import ExtractedFacts, FIELD_NAMES, FieldObservation, build_extracted_facts, extract_observations_from_pages
+from .extraction import (
+    FIELD_NAMES,
+    ExtractedFacts,
+    ExtractionMethod,
+    FieldObservation,
+    build_extracted_facts,
+    extract_observations_from_pages,
+)
 from .models import KapDisclosure
+from .ocr import OcrCache, OcrConfig, load_ocr_config_from_env, ocr_pdf
 from .pdf import PdfCache, fetch_and_read_pdf
 
 DEFAULT_CACHE_DIR = Path("data") / "cache" / "kap_pdfs"
@@ -34,6 +42,11 @@ DEFAULT_CACHE_DIR = Path("data") / "cache" / "kap_pdfs"
 # run through the field extractors.
 _EXTRACTION_ELIGIBLE_TYPES = frozenset({"approved_prospectus", "investor_sale_announcement"})
 
+# pdf_status values OCR is attempted for — a digitally-readable PDF
+# ("ok") never touches OCR; "malformed"/"unavailable" mean there's no
+# usable PDF bytes to render in the first place.
+_OCR_ELIGIBLE_PDF_STATUSES = frozenset({"scanned", "empty"})
+
 
 def process_disclosure_documents(
     disclosure: KapDisclosure,
@@ -42,6 +55,9 @@ def process_disclosure_documents(
     client: httpx.Client | None = None,
     cache: PdfCache | None = None,
     cache_only: bool = False,
+    ocr_scanned: bool = False,
+    ocr_config: OcrConfig | None = None,
+    ocr_cache: OcrCache | None = None,
 ) -> KapDisclosure:
     """Resolve attachments, download+parse the primary one, and (for
     prospectus/announcement disclosures) extract fields — returning an
@@ -61,6 +77,14 @@ def process_disclosure_documents(
     rather than triggering a download (used by the Gemini analysis layer,
     which must only analyze documents an earlier ``--parse-documents``
     run already cached).
+
+    If ``ocr_scanned`` is set and the primary PDF's digital text layer
+    comes back ``"scanned"``/``"empty"``, :mod:`halka_arz_advisor.kap.ocr`
+    is used as a fallback (never for an already-readable ``"ok"`` PDF) —
+    the outcome is recorded separately via ``ocr_status``/``ocr_warnings``
+    without changing what ``pdf_status`` means. Field extraction runs
+    against OCR'd pages exactly as it would against digital ones, tagging
+    the resulting observations' provenance ``extraction_method="ocr"``.
     """
     if disclosure.disclosure_index is None:
         return replace(
@@ -97,14 +121,36 @@ def process_disclosure_documents(
         cache_only=cache_only,
     )
 
+    pages = fetch_result.pages
+    extraction_method: ExtractionMethod = "digital"
+    ocr_status = None
+    ocr_warnings: tuple[str, ...] = ()
+    have_usable_pages = fetch_result.status == "ok"
+
+    if ocr_scanned and fetch_result.status in _OCR_ELIGIBLE_PDF_STATUSES:
+        pdf_bytes = cache.get(primary.obj_id) if cache is not None else None
+        if pdf_bytes is None:
+            ocr_status = "ocr_unavailable"
+            ocr_warnings = ("OCR requested but the cached PDF bytes were not available to render",)
+        else:
+            ocr_result = ocr_pdf(pdf_bytes, config=ocr_config or load_ocr_config_from_env(), cache=ocr_cache)
+            ocr_status = ocr_result.status
+            ocr_warnings = ocr_result.warnings
+            if ocr_result.pages:
+                pages = ocr_result.pages
+                extraction_method = "ocr"
+                have_usable_pages = True
+
     base_update = {
         "attachments": attachments,
         "attachment_urls": tuple(a.url for a in attachments),
         "primary_document": primary,
         "pdf_status": fetch_result.status,
+        "ocr_status": ocr_status,
+        "ocr_warnings": ocr_warnings,
     }
 
-    if fetch_result.status != "ok":
+    if not have_usable_pages:
         warning = f"primary attachment PDF status: {fetch_result.status}"
         if fetch_result.error:
             warning += f" ({fetch_result.error})"
@@ -114,10 +160,11 @@ def process_disclosure_documents(
         return replace(disclosure, **base_update, extraction_warnings=())
 
     observations = extract_observations_from_pages(
-        fetch_result.pages,
+        pages,
         document_type=disclosure.document_type,
         disclosure_id=disclosure.disclosure_id,
         attachment_url=primary.url,
+        extraction_method=extraction_method,
     )
     is_prospectus = disclosure.document_type == "approved_prospectus"
     facts = build_extracted_facts(

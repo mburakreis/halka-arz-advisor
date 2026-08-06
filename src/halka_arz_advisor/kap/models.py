@@ -16,6 +16,7 @@ from .attachments import KapAttachment
 from .classification import DocumentType, classify_title
 from .exceptions import KapSchemaError
 from .extraction import ExtractedFacts
+from .ocr import OcrStatus
 from .pdf import PdfStatus
 
 KAP_NOTIFICATION_URL_TEMPLATE = "https://www.kap.org.tr/tr/Bildirim/{index}"
@@ -47,6 +48,13 @@ class KapDisclosure:
     pdf_status: PdfStatus | None = None
     extracted_facts: ExtractedFacts | None = None
     extraction_warnings: tuple[str, ...] = ()
+
+    # Populated only when process_disclosure_documents is run with
+    # ocr_scanned=True *and* pdf_status ended up "scanned"/"empty" — a
+    # digitally-readable PDF never touches OCR, so these stay at their
+    # defaults (pdf_status alone keeps its original meaning either way).
+    ocr_status: OcrStatus | None = None
+    ocr_warnings: tuple[str, ...] = ()
 
 
 def _single_token(value: object) -> str | None:

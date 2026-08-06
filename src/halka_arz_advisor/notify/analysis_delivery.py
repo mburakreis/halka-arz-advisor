@@ -18,6 +18,7 @@ from ..gemini.analysis import lookup_analysis
 from ..gemini.cache import AnalysisCache
 from ..kap.extraction import ExtractedFacts
 from ..kap.models import KapDisclosure
+from ..kap.ocr import OcrCache, OcrConfig
 from ..kap.pdf import PdfCache
 from .analysis_formatting import format_analysis_notification
 from .analysis_identity import analysis_notification_hash
@@ -50,6 +51,8 @@ def deliver_pending_analyses(
     state: SentAnalysesState,
     infer_company_name_and_ticker: CompanyNameAndTicker,
     sender: Sender,
+    ocr_cache: OcrCache | None = None,
+    ocr_config: OcrConfig | None = None,
 ) -> DeliveryResult:
     """For each company: look up its most recent cached analysis (never
     calling Gemini), skip it unless the status is ``completed`` or
@@ -75,6 +78,8 @@ def deliver_pending_analyses(
             pdf_cache=pdf_cache,
             analysis_cache=analysis_cache,
             model_name=model,
+            ocr_cache=ocr_cache,
+            ocr_config=ocr_config,
         )
         if record is None or record.llm_status not in DELIVERABLE_STATUSES:
             result.skipped_no_analysis_record_ids.append(record_id)

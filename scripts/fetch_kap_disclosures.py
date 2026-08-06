@@ -9,6 +9,7 @@ Usage:
     uv run python scripts/fetch_kap_disclosures.py --days 30 --year 2026
     uv run python scripts/fetch_kap_disclosures.py --days 30 --year 2026 --parse-documents
     uv run python scripts/fetch_kap_disclosures.py --year 2026 --ticker QUICK --parse-documents
+    uv run python scripts/fetch_kap_disclosures.py --year 2026 --ticker MASFN --parse-documents --ocr-scanned
 
 Progress/diagnostics go to stderr; the normalized JSON goes to stdout
 only, so `... > out.json` captures just the data.
@@ -17,9 +18,21 @@ only, so `... > out.json` captures just the data.
 primary PDF for every *matched* target-type disclosure (see
 halka_arz_advisor.kap.documents) — not every disclosure, to avoid
 downloading dozens of PDFs nobody asked about; combine with ``--ticker``
-to restrict this to one company. No OCR, scoring, recommendations, or
-Telegram notifications happen here — this is read-only ingestion,
-matching, and deterministic text extraction only.
+to restrict this to one company.
+
+``--ocr-scanned`` (combined with ``--parse-documents``) additionally
+runs local OCR (see halka_arz_advisor.kap.ocr — pypdfium2 rendering +
+the Tesseract CLI, tur+eng, no paid/hosted API) for any matched
+document whose digital text layer comes back scanned/empty; a
+digitally-readable PDF never touches OCR. Configured via
+OCR_ENABLED/OCR_DPI/OCR_MAX_PAGES/OCR_TIMEOUT_SECONDS (see
+.env.example) — OCR text is cached under data/cache/kap_ocr/, so an
+unchanged document is never OCR'd twice. Without this flag, a
+scanned/empty document is reported as such and skipped, same as before.
+
+No scoring, recommendations, or Telegram notifications happen here —
+this is read-only ingestion, matching, and deterministic text
+extraction only.
 """
 
 from __future__ import annotations
@@ -42,6 +55,7 @@ from halka_arz_advisor.kap.exceptions import KapApiError  # noqa: E402
 from halka_arz_advisor.kap.extraction import ExtractedFacts, FIELD_NAMES  # noqa: E402
 from halka_arz_advisor.kap.matching import match_disclosure  # noqa: E402
 from halka_arz_advisor.kap.models import KapDisclosure  # noqa: E402
+from halka_arz_advisor.kap.ocr import DEFAULT_OCR_CACHE_DIR, OcrCache, load_ocr_config_from_env  # noqa: E402
 from halka_arz_advisor.kap.pdf import PdfCache  # noqa: E402
 from halka_arz_advisor.probe.config import ProbeConfig  # noqa: E402
 from halka_arz_advisor.spk.application_list import SpkApplicationListClient  # noqa: E402
@@ -69,7 +83,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Resolve attachments and download/read the primary PDF for every matched target-type "
         "disclosure, extracting IPO participation fields where the document type supports it.",
     )
+    parser.add_argument(
+        "--ocr-scanned", action="store_true",
+        help="With --parse-documents: also OCR (local Tesseract, tur+eng) any matched document whose "
+        "digital text layer comes back scanned/empty. A digitally-readable PDF is never OCR'd. "
+        "Configured via OCR_ENABLED/OCR_DPI/OCR_MAX_PAGES/OCR_TIMEOUT_SECONDS.",
+    )
     parser.add_argument("--cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_CACHE_DIR)
+    parser.add_argument("--ocr-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_OCR_CACHE_DIR)
     return parser.parse_args(argv)
 
 
@@ -135,6 +156,8 @@ def _disclosure_to_json(d: KapDisclosure) -> dict:
             else None
         ),
         "pdf_status": d.pdf_status,
+        "ocr_status": d.ocr_status,
+        "ocr_warnings": list(d.ocr_warnings),
         "extracted_facts": _extracted_facts_to_json(d.extracted_facts),
         "extraction_warnings": list(d.extraction_warnings),
     }
@@ -196,6 +219,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.parse_documents:
         cache = PdfCache(args.cache_dir)
+        ocr_cache = OcrCache(args.ocr_cache_dir) if args.ocr_scanned else None
+        if args.ocr_scanned:
+            ocr_config = load_ocr_config_from_env()
+            print(
+                f"OCR fallback enabled: dpi={ocr_config.dpi} max_pages={ocr_config.max_pages} "
+                f"timeout={ocr_config.timeout_seconds}s languages={ocr_config.languages} "
+                f"enabled={ocr_config.enabled}",
+                file=sys.stderr,
+            )
         to_process = [d for d in matched if d.match_method != "unmatched"]
         print(f"Resolving attachments and parsing PDFs for {len(to_process)} matched disclosure(s)...", file=sys.stderr)
         processed_by_id = {}
@@ -203,7 +235,9 @@ def main(argv: list[str] | None = None) -> int:
             if i > 0:
                 time.sleep(config.delay_between_requests_seconds)
             try:
-                processed_by_id[d.disclosure_id] = process_disclosure_documents(d, config=config, cache=cache)
+                processed_by_id[d.disclosure_id] = process_disclosure_documents(
+                    d, config=config, cache=cache, ocr_scanned=args.ocr_scanned, ocr_cache=ocr_cache
+                )
             except KapApiError as exc:
                 print(
                     f"  WARNING: failed to process documents for {d.disclosure_id} ({d.company_name}): "
@@ -217,6 +251,13 @@ def main(argv: list[str] | None = None) -> int:
             if d.pdf_status:
                 pdf_status_counts[d.pdf_status] = pdf_status_counts.get(d.pdf_status, 0) + 1
         print(f"PDF status breakdown: {pdf_status_counts}", file=sys.stderr)
+
+        if args.ocr_scanned:
+            ocr_status_counts: dict[str, int] = {}
+            for d in matched:
+                if d.ocr_status:
+                    ocr_status_counts[d.ocr_status] = ocr_status_counts.get(d.ocr_status, 0) + 1
+            print(f"OCR status breakdown: {ocr_status_counts}", file=sys.stderr)
 
         company_facts = aggregate_company_facts(matched)
         output = {

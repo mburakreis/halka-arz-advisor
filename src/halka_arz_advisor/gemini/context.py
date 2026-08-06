@@ -8,9 +8,12 @@ Two hard rules from the brief, both enforced here:
   proceeds, risk factors, financial position, indebtedness, related-party
   transactions, litigation, dividend policy), and the total is capped at
   a fixed character budget.
-- **Never re-download.** Text is read purely from the existing
-  :class:`~halka_arz_advisor.kap.pdf.PdfCache` — a cache miss just means
-  no sections come from that document, not a fetch.
+- **Never re-download, never (re-)OCR.** Text is read purely from the
+  existing :class:`~halka_arz_advisor.kap.pdf.PdfCache` and, for a
+  scanned/empty PDF, from :class:`~halka_arz_advisor.kap.ocr.OcrCache`
+  via :func:`~halka_arz_advisor.kap.ocr.lookup_ocr_result` (a pure cache
+  read — never invokes Tesseract) — a cache miss on either just means no
+  sections come from that document, not a fetch or an OCR run.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..kap.models import KapDisclosure
+from ..kap.ocr import OcrCache, OcrConfig, load_ocr_config_from_env, lookup_ocr_result
 from ..kap.pdf import PdfCache, PdfPage, load_pdf_text
 from ..kap.text import fold_turkish
 
@@ -50,18 +54,38 @@ class ContextSection:
     text: str
 
 
-def read_cached_pdf_pages(obj_id: str, cache: PdfCache) -> tuple[PdfPage, ...]:
+def read_cached_pdf_pages(
+    obj_id: str,
+    cache: PdfCache,
+    *,
+    ocr_cache: OcrCache | None = None,
+    ocr_config: OcrConfig | None = None,
+) -> tuple[PdfPage, ...]:
     """Read one attachment's page text purely from the local cache.
 
-    Never downloads. Returns an empty tuple if the attachment isn't
-    cached, or has no usable text (scanned/empty/malformed) — a cache
-    miss is a normal, expected outcome here, not an error.
+    Never downloads and never runs OCR. Returns an empty tuple if the
+    attachment isn't cached at all. If the digital text layer is
+    scanned/empty and ``ocr_cache`` is given, falls back to whatever OCR
+    text is already cached for it (see
+    :func:`~halka_arz_advisor.kap.ocr.lookup_ocr_result`) — a cache miss
+    there (never OCR'd, or OCR disabled/failed) again just means no
+    pages, not a fetch/OCR run triggered from here.
     """
     cached_bytes = cache.get(obj_id)
     if cached_bytes is None:
         return ()
     document = load_pdf_text(cached_bytes)
-    return document.pages if document.status == "ok" else ()
+    if document.status == "ok":
+        return document.pages
+
+    if document.status in ("scanned", "empty") and ocr_cache is not None:
+        ocr_result = lookup_ocr_result(
+            cached_bytes, config=ocr_config or load_ocr_config_from_env(), cache=ocr_cache
+        )
+        if ocr_result is not None:
+            return ocr_result.pages
+
+    return ()
 
 
 def _categorize_page(page: PdfPage) -> str | None:
@@ -103,9 +127,13 @@ def select_context_sections(
     *,
     max_total_chars: int = DEFAULT_MAX_TOTAL_CHARS,
     max_chars_per_section: int = DEFAULT_MAX_CHARS_PER_SECTION,
+    ocr_cache: OcrCache | None = None,
+    ocr_config: OcrConfig | None = None,
 ) -> list[ContextSection]:
     """Build the bounded, page-aware context sections for a company's
-    matched disclosures, reading text purely from ``cache``.
+    matched disclosures, reading text purely from ``cache`` (and, for a
+    scanned/empty PDF, from ``ocr_cache`` if given — see
+    :func:`read_cached_pdf_pages`).
 
     Sections are collected in disclosure order, then page order, and
     kept until ``max_total_chars`` would be exceeded — the remainder is
@@ -116,7 +144,9 @@ def select_context_sections(
     for disclosure in disclosures:
         if disclosure.primary_document is None:
             continue
-        pages = read_cached_pdf_pages(disclosure.primary_document.obj_id, cache)
+        pages = read_cached_pdf_pages(
+            disclosure.primary_document.obj_id, cache, ocr_cache=ocr_cache, ocr_config=ocr_config
+        )
         candidates.extend(
             select_sections_for_disclosure(disclosure, pages, max_chars_per_section=max_chars_per_section)
         )

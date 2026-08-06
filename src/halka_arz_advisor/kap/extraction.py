@@ -73,6 +73,9 @@ PROSPECTUS_PRIORITY_FIELDS = frozenset(
 )
 
 
+ExtractionMethod = Literal["digital", "ocr"]
+
+
 @dataclass(frozen=True, slots=True)
 class SourceRef:
     """Where one observed value came from."""
@@ -81,6 +84,7 @@ class SourceRef:
     disclosure_id: str
     attachment_url: str
     page_number: int | None
+    extraction_method: ExtractionMethod = "digital"
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,9 +374,19 @@ def extract_observations_from_pages(
     document_type: str,
     disclosure_id: str,
     attachment_url: str,
+    extraction_method: ExtractionMethod = "digital",
 ) -> dict[str, FieldObservation]:
     """Run every field extractor over ``pages`` (in page order), keeping
-    the *first* match found for each field, with its page number."""
+    the *first* match found for each field, with its page number.
+
+    ``pages`` may come from the PDF's own digital text layer or from
+    OCR (see :mod:`halka_arz_advisor.kap.ocr`) — the regex matching
+    itself is identical either way; ``extraction_method`` only tags the
+    resulting observations' provenance so a later conflict between a
+    digital and an OCR'd observation (see
+    :func:`merge_field_observations`) is distinguishable, never silently
+    resolved by simply preferring one.
+    """
     observations: dict[str, FieldObservation] = {}
 
     for page in pages:
@@ -384,14 +398,14 @@ def extract_observations_from_pages(
             observations["subscription_start_date"] = FieldObservation(
                 value=value,
                 raw_snippet=snippet,
-                source=SourceRef(document_type, disclosure_id, attachment_url, page.number),
+                source=SourceRef(document_type, disclosure_id, attachment_url, page.number, extraction_method),
             )
         if end and "subscription_end_date" not in observations:
             value, snippet = end
             observations["subscription_end_date"] = FieldObservation(
                 value=value,
                 raw_snippet=snippet,
-                source=SourceRef(document_type, disclosure_id, attachment_url, page.number),
+                source=SourceRef(document_type, disclosure_id, attachment_url, page.number, extraction_method),
             )
 
     for field_name, extractor in _SCALAR_EXTRACTORS:
@@ -402,7 +416,7 @@ def extract_observations_from_pages(
                 observations[field_name] = FieldObservation(
                     value=value,
                     raw_snippet=snippet,
-                    source=SourceRef(document_type, disclosure_id, attachment_url, page.number),
+                    source=SourceRef(document_type, disclosure_id, attachment_url, page.number, extraction_method),
                 )
                 break
 
@@ -415,7 +429,7 @@ def extract_observations_from_pages(
                 observations[field_name] = FieldObservation(
                     value=value,
                     raw_snippet=snippet,
-                    source=SourceRef(document_type, disclosure_id, attachment_url, page.number),
+                    source=SourceRef(document_type, disclosure_id, attachment_url, page.number, extraction_method),
                 )
                 break
 

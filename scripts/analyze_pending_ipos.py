@@ -21,9 +21,12 @@ skipped (nothing is cached for it, so it's retried on a later run) and
 the rest continue. Only a total preflight failure (API unreachable, or
 the configured model unavailable) stops the whole run.
 
-No OCR, financial scoring formulas, Telegram changes, or news
-monitoring happen here. GitHub Actions only invokes this same script —
-no separate logic lives in the workflow.
+This command never runs OCR itself — it only reads whatever
+``fetch_kap_disclosures.py --ocr-scanned`` already cached under
+data/cache/kap_ocr/ (see halka_arz_advisor.kap.ocr), same read-only
+treatment as the PDF cache. No financial scoring formulas, Telegram
+changes, or news monitoring happen here. GitHub Actions only invokes
+this same script — no separate logic lives in the workflow.
 """
 
 from __future__ import annotations
@@ -49,6 +52,7 @@ from halka_arz_advisor.kap.documents import DEFAULT_CACHE_DIR, aggregate_company
 from halka_arz_advisor.kap.exceptions import KapApiError  # noqa: E402
 from halka_arz_advisor.kap.matching import match_disclosure  # noqa: E402
 from halka_arz_advisor.kap.models import KapDisclosure  # noqa: E402
+from halka_arz_advisor.kap.ocr import DEFAULT_OCR_CACHE_DIR, OcrCache  # noqa: E402
 from halka_arz_advisor.kap.pdf import PdfCache  # noqa: E402
 from halka_arz_advisor.notify.env import load_dotenv_if_present  # noqa: E402
 from halka_arz_advisor.probe.config import ProbeConfig  # noqa: E402
@@ -71,6 +75,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ticker", type=str, default=None, help="Only analyze this ticker (case-insensitive)")
     parser.add_argument("--pdf-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_CACHE_DIR)
     parser.add_argument("--analysis-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_ANALYSIS_CACHE_DIR)
+    parser.add_argument("--ocr-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_OCR_CACHE_DIR)
     parser.add_argument("--env-file", type=Path, default=PROJECT_ROOT / ".env")
     return parser.parse_args(argv)
 
@@ -154,6 +159,7 @@ def main(argv: list[str] | None = None) -> int:
     # small JSON call), but the PDF itself is only ever read from
     # pdf_cache — never (re-)downloaded here.
     pdf_cache = PdfCache(args.pdf_cache_dir)
+    ocr_cache = OcrCache(args.ocr_cache_dir)
     processed = [
         process_disclosure_documents(d, config=config, cache=pdf_cache, cache_only=True) for d in matched
     ]
@@ -210,6 +216,7 @@ def main(argv: list[str] | None = None) -> int:
                 pdf_cache=pdf_cache,
                 analysis_cache=analysis_cache,
                 gemini_client=gemini_client,
+                ocr_cache=ocr_cache,
             )
         except GeminiUnavailableError as exc:
             # Rate limit / quota / temporary server error for this one

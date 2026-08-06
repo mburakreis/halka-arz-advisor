@@ -33,31 +33,45 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: uv run python scripts/check_and_notify.py --state-file state/seen_records.json
 
-      # actions/cache's post-job save step needs both paths to exist —
-      # normally guaranteed by the fetch/analysis steps below writing at
-      # least one file, but not on a run that matches/analyzes nothing
-      # (e.g. no KAP disclosures at all in the lookback window).
+      # actions/cache's post-job save step needs all three paths to
+      # exist — normally guaranteed by the fetch/analysis steps below
+      # writing at least one file, but not on a run that matches/
+      # analyzes nothing (e.g. no KAP disclosures at all in the
+      # lookback window).
       - name: Ensure cache directories exist
-        run: mkdir -p data/cache/kap_pdfs data/cache/llm_analysis
+        run: mkdir -p data/cache/kap_pdfs data/cache/llm_analysis data/cache/kap_ocr
 
-      # KAP PDFs and Gemini analysis results are pure caches (like the
-      # rest of data/cache/*, gitignored — see .gitignore), not
-      # notification state, so they persist across runs via the
+      # KAP PDFs, Gemini analysis results, and OCR text are pure caches
+      # (like the rest of data/cache/*, gitignored — see .gitignore),
+      # not notification state, so they persist across runs via the
       # Actions cache rather than being committed to the repo like
       # state/seen_records.json below. Restored here, saved
       # automatically at the end of the job.
-      - name: Restore KAP PDF and Gemini analysis caches
+      - name: Restore KAP PDF, Gemini analysis, and OCR caches
         uses: actions/cache@v4
         with:
           path: |
             data/cache/kap_pdfs
             data/cache/llm_analysis
+            data/cache/kap_ocr
           key: llm-analysis-cache-${{ github.run_id }}
           restore-keys: |
             llm-analysis-cache-
 
+      # Local OCR fallback for scanned/empty KAP PDFs (halka_arz_advisor.kap.ocr)
+      # — Tesseract CLI with Turkish + English language data, no paid/
+      # hosted API. continue-on-error: if this install fails, OCR simply
+      # comes back "ocr_unavailable" for any document that needed it
+      # (get_tesseract_version() returns None), same as a machine that
+      # never had Tesseract at all — every other step still runs.
+      - name: Install Tesseract OCR (tur+eng)
+        continue-on-error: true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-tur tesseract-ocr-eng
+
       - name: Fetch and cache KAP disclosure documents
-        run: uv run python scripts/fetch_kap_disclosures.py --parse-documents > /dev/null
+        run: uv run python scripts/fetch_kap_disclosures.py --parse-documents --ocr-scanned > /dev/null
 
       - name: Run Gemini analysis for pending IPOs
         # A quota/rate-limit/temporary Gemini error must not fail the

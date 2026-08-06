@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 
 from ..kap.extraction import FIELD_NAMES, ExtractedFacts
 from ..kap.models import KapDisclosure
+from ..kap.ocr import OcrCache, OcrConfig
 from ..kap.pdf import PdfCache
 from .cache import AnalysisCache, compute_cache_key
 from .client import GeminiClient
@@ -81,6 +82,8 @@ def lookup_analysis(
     analysis_cache: AnalysisCache,
     model_name: str,
     max_total_chars: int = DEFAULT_MAX_TOTAL_CHARS,
+    ocr_cache: OcrCache | None = None,
+    ocr_config: OcrConfig | None = None,
 ) -> AnalysisRecord | None:
     """Look up the most recently produced analysis for one company
     *without* ever calling Gemini — for tooling (e.g.
@@ -95,7 +98,9 @@ def lookup_analysis(
     :func:`analyze_company`) is synthesized fresh here too, since that
     status is never itself written to ``analysis_cache``.
     """
-    sections = select_context_sections(disclosures, pdf_cache, max_total_chars=max_total_chars)
+    sections = select_context_sections(
+        disclosures, pdf_cache, max_total_chars=max_total_chars, ocr_cache=ocr_cache, ocr_config=ocr_config
+    )
     if not sections:
         return _insufficient_data_record(spk_record_id, model_name)
 
@@ -120,6 +125,8 @@ def analyze_company(
     analysis_cache: AnalysisCache,
     gemini_client: GeminiClient,
     max_total_chars: int = DEFAULT_MAX_TOTAL_CHARS,
+    ocr_cache: OcrCache | None = None,
+    ocr_config: OcrConfig | None = None,
 ) -> AnalysisRecord:
     """Analyze one company (one matched SPK record).
 
@@ -130,12 +137,16 @@ def analyze_company(
     silently downgraded.
 
     Reads PDF text purely from ``pdf_cache`` (see
-    :mod:`halka_arz_advisor.gemini.context`) — never downloads. If none
-    of the company's cached documents have extractable text,
+    :mod:`halka_arz_advisor.gemini.context`) — never downloads, and
+    never runs OCR itself (``ocr_cache`` is a read-only lookup of
+    whatever ``fetch_kap_disclosures.py --ocr-scanned`` already cached).
+    If none of the company's cached documents have extractable text,
     ``llm_status="insufficient_data"`` is returned without calling Gemini
     at all.
     """
-    sections = select_context_sections(disclosures, pdf_cache, max_total_chars=max_total_chars)
+    sections = select_context_sections(
+        disclosures, pdf_cache, max_total_chars=max_total_chars, ocr_cache=ocr_cache, ocr_config=ocr_config
+    )
 
     if not sections:
         return _insufficient_data_record(spk_record_id, gemini_client.model_name)

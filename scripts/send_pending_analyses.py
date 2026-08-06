@@ -45,6 +45,7 @@ from halka_arz_advisor.kap.documents import DEFAULT_CACHE_DIR, aggregate_company
 from halka_arz_advisor.kap.exceptions import KapApiError  # noqa: E402
 from halka_arz_advisor.kap.matching import match_disclosure  # noqa: E402
 from halka_arz_advisor.kap.models import KapDisclosure  # noqa: E402
+from halka_arz_advisor.kap.ocr import DEFAULT_OCR_CACHE_DIR, OcrCache  # noqa: E402
 from halka_arz_advisor.kap.pdf import PdfCache  # noqa: E402
 from halka_arz_advisor.notify.analysis_delivery import deliver_pending_analyses  # noqa: E402
 from halka_arz_advisor.notify.analysis_state import load_state, save_state  # noqa: E402
@@ -76,6 +77,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ticker", type=str, default=None, help="Only consider this ticker (case-insensitive)")
     parser.add_argument("--pdf-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_CACHE_DIR)
     parser.add_argument("--analysis-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_ANALYSIS_CACHE_DIR)
+    parser.add_argument("--ocr-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_OCR_CACHE_DIR)
     parser.add_argument("--state-file", type=Path, default=PROJECT_ROOT / DEFAULT_STATE_FILE)
     parser.add_argument("--env-file", type=Path, default=PROJECT_ROOT / ".env")
     parser.add_argument(
@@ -157,6 +159,7 @@ def main(argv: list[str] | None = None) -> int:
     # metadata is resolved live, but the PDF itself is only ever read
     # from pdf_cache, never (re-)downloaded here.
     pdf_cache = PdfCache(args.pdf_cache_dir)
+    ocr_cache = OcrCache(args.ocr_cache_dir)
     processed = [
         process_disclosure_documents(d, config=config, cache=pdf_cache, cache_only=True) for d in matched
     ]
@@ -192,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
         state=state,
         infer_company_name_and_ticker=_infer_company_name_and_ticker,
         sender=_sender,
+        ocr_cache=ocr_cache,
     )
 
     for record_id in result.sent_record_ids:

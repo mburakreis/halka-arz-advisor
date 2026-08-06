@@ -1,0 +1,128 @@
+[
+  {
+    "disclosureBasic": {
+      "title": "İzahname (SPK Tarafından Onaylanan)",
+      "mkkMemberOid": "4028328c9d7b22d3019df32754701001",
+      "companyTitle": "CVK MADEN İŞLETMELERİ SANAYİ VE TİCARET A.Ş.",
+      "stockCode": "CVKMD",
+      "relatedStocks": null,
+      "disclosureClass": "DG",
+      "disclosureType": "DG",
+      "disclosureCategory": "ODA",
+      "publishDate": "03.08.2026 13:21:39",
+      "disclosureId": "kap-id-izahname-cvkmd",
+      "disclosureIndex": 1641990,
+      "summary": "CVK Maden İşletmeleri Sanayi ve Ticaret A.Ş. İzahnamesi",
+      "attachmentCount": 1
+    },
+    "disclosureDetail": {
+      "mainDisclosureDocumentId": "disclosure_izahname_cvkmd",
+      "oldKap": false
+    }
+  },
+  {
+    "disclosureBasic": {
+      "title": "Halka Arz Sonuçları",
+      "mkkMemberOid": "4028e4a141da49e50141e08580772b86",
+      "companyTitle": "GARANTİ YATIRIM MENKUL KIYMETLER A.Ş.",
+      "stockCode": "GRM, GRYAT",
+      "relatedStocks": "QUICK",
+      "disclosureClass": "DG",
+      "disclosureType": "DG",
+      "disclosureCategory": "ODA",
+      "publishDate": "03.08.2026 09:55:21",
+      "disclosureId": "kap-id-sonuclar-quick",
+      "disclosureIndex": 1641885,
+      "summary": "Quick Sigorta A.Ş. Paylarının Halka Arzına İlişkin Sonuçlar",
+      "attachmentCount": 1
+    },
+    "disclosureDetail": {
+      "mainDisclosureDocumentId": null,
+      "oldKap": false
+    }
+  },
+  {
+    "disclosureBasic": {
+      "title": "Fiyat Tespit Raporu",
+      "mkkMemberOid": "4028e4a241462fd801414b163d4d184e",
+      "companyTitle": "VAKIF YATIRIM MENKUL DEĞERLER A.Ş.",
+      "stockCode": "VKY",
+      "relatedStocks": "A1CAP, ACP, KARCL, ZRY",
+      "disclosureClass": "DG",
+      "disclosureType": "DG",
+      "disclosureCategory": "ODA",
+      "publishDate": "17.07.2026 18:21:47",
+      "disclosureId": "kap-id-fiyat-tespit-ambiguous",
+      "disclosureIndex": 1634617,
+      "summary": "Kardemir Çelik Sanayi A.Ş. Fiyat Tespit Raporu",
+      "attachmentCount": 1
+    },
+    "disclosureDetail": {
+      "mainDisclosureDocumentId": null,
+      "oldKap": false
+    }
+  },
+  {
+    "disclosureBasic": {
+      "title": "Tasarruf Sahiplerine Satış Duyurusu",
+      "mkkMemberOid": "4028328c9d7b22d3019df32754701002",
+      "companyTitle": "PASİFİK TEKNOLOJİ A.Ş.",
+      "stockCode": "PATEK",
+      "relatedStocks": null,
+      "disclosureClass": "DG",
+      "disclosureType": "DG",
+      "disclosureCategory": "ODA",
+      "publishDate": "10.01.2026 10:00:00",
+      "disclosureId": "kap-id-satis-duyurusu-patek",
+      "disclosureIndex": 1600001,
+      "summary": "Pasifik Teknoloji A.Ş. Tasarruf Sahiplerine Satış Duyurusu",
+      "attachmentCount": 1
+    },
+    "disclosureDetail": {
+      "mainDisclosureDocumentId": null,
+      "oldKap": false
+    }
+  },
+  {
+    "disclosureBasic": {
+      "title": "Payların İşlem Görmeye Başlaması",
+      "mkkMemberOid": "borsa-istanbul-oid",
+      "companyTitle": "BORSA İSTANBUL A.Ş.",
+      "stockCode": null,
+      "relatedStocks": "PATEK",
+      "disclosureClass": "DUY",
+      "disclosureType": "DUY",
+      "disclosureCategory": "ODA",
+      "publishDate": "13.02.2026 09:00:00",
+      "disclosureId": "kap-id-islem-baslama-patek",
+      "disclosureIndex": 1600123,
+      "summary": "PATEK.E payları 13.02.2026 tarihinden itibaren işlem görmeye başlayacaktır",
+      "attachmentCount": 0
+    },
+    "disclosureDetail": {
+      "mainDisclosureDocumentId": null,
+      "oldKap": false
+    }
+  },
+  {
+    "disclosureBasic": {
+      "title": "Genel Kurul İşlemlerine İlişkin Bildirim",
+      "mkkMemberOid": "4028e4a1413b7ef401413bc2251e0047",
+      "companyTitle": "ASELSAN ELEKTRONİK SANAYİ VE TİCARET A.Ş.",
+      "stockCode": "ASELS",
+      "relatedStocks": null,
+      "disclosureClass": "ODA",
+      "disclosureType": "CA",
+      "disclosureCategory": "STT",
+      "publishDate": "04.05.2026 18:14:33",
+      "disclosureId": "kap-id-genel-kurul-asels",
+      "disclosureIndex": 1600707,
+      "summary": "Olağan Genel Kurul Çağrısı",
+      "attachmentCount": 2
+    },
+    "disclosureDetail": {
+      "mainDisclosureDocumentId": null,
+      "oldKap": false
+    }
+  }
+]

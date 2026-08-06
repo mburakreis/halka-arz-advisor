@@ -22,5 +22,9 @@ wheels/
 /data/state/*
 !/data/state/.gitkeep
 
+# Cached KAP PDF attachments (downloaded once, keyed by KAP's objId)
+/data/cache/*
+!/data/cache/.gitkeep
+
 # Secrets
 .env

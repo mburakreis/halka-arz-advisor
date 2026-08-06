@@ -1,0 +1,96 @@
+{
+  "openapi": "3.0.1",
+  "info": {
+    "title": "SPK Web Servisleri",
+    "version": "v2"
+  },
+  "paths": {
+    "/BorclanmaAraclari/api/IlkHalkaArzVerileri": {
+      "get": {
+        "tags": ["BorclanmaAraclari"],
+        "summary": "İlk Halka Arz Verileri",
+        "parameters": [
+          {
+            "name": "yil",
+            "in": "query",
+            "description": "Yil (yyyy)",
+            "schema": { "type": "integer", "format": "int32" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/IlkHalkaArzVerileriBilgi" }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/IlkHalkaArzVerileriBilgi" }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/IlkHalkaArzVerileriBilgi" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/AKBankaFaaliyet/api/AraciKurumListe": {
+      "get": {
+        "tags": ["AKBankaFaaliyet"],
+        "summary": "Tüm Aracı Kurum Listesi",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/IntermediaryInstitutionItem" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "IlkHalkaArzVerileriBilgi": {
+        "type": "object",
+        "properties": {
+          "ay": { "type": "integer", "format": "int32" },
+          "donem": { "type": "string", "nullable": true },
+          "borsaKodu": { "type": "string", "nullable": true },
+          "sirketUnvani": { "type": "string", "nullable": true },
+          "halkaArzSekli": { "type": "string", "nullable": true },
+          "halkaArzOrani": { "type": "number", "format": "double", "nullable": true },
+          "halkaArzFiyatiTl": { "type": "number", "format": "double", "nullable": true },
+          "ortakSatisBinTl": { "type": "integer", "format": "int64", "nullable": true },
+          "nakitSermayeArtisiBinTl": { "type": "integer", "format": "int64", "nullable": true },
+          "ekSatisTutariBinTl": { "type": "integer", "format": "int64", "nullable": true },
+          "satisaHazirBekletilenPayTutariBinTl": { "type": "integer", "format": "int64", "nullable": true },
+          "satisaSunulanToplamTutarBinABDDolari": { "type": "number", "format": "double", "nullable": true },
+          "satisaSunulanToplamTutarBinTl": { "type": "integer", "format": "int64", "nullable": true },
+          "mevcutSermayeBinTl": { "type": "number", "format": "double", "nullable": true },
+          "yeniSermayeBinTl": { "type": "number", "format": "double", "nullable": true },
+          "satisaSunulanToplamTutarPiyasaDegeriBinTl": { "type": "number", "format": "double", "nullable": true },
+          "ilkIslemGorduguPazar": { "type": "string", "nullable": true },
+          "halkaArzaAracilikEdenKurum": { "type": "string", "nullable": true },
+          "borsadaIslemGormeTarihi": { "type": "string", "format": "date-time", "nullable": true }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}

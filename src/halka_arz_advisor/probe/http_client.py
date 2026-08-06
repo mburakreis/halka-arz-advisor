@@ -33,9 +33,18 @@ def build_client(config: ProbeConfig) -> httpx.Client:
 
 
 def fetch_with_retry(
-    client: httpx.Client, url: str, config: ProbeConfig
+    client: httpx.Client,
+    url: str,
+    config: ProbeConfig,
+    *,
+    params: dict | None = None,
+    headers: dict | None = None,
 ) -> httpx.Response:
     """GET ``url``, retrying only transient failures with bounded backoff.
+
+    ``params``/``headers`` are passed straight through to ``client.get``
+    for the caller's per-request needs (query args, ``Accept`` overrides)
+    on top of whatever the client was built with in ``build_client``.
 
     Raises the last transport exception if every attempt fails. Returns
     the response (even if it is a non-retryable error status) so the
@@ -47,7 +56,7 @@ def fetch_with_retry(
     for attempt in range(attempts):
         is_last_attempt = attempt == attempts - 1
         try:
-            response = client.get(url)
+            response = client.get(url, params=params, headers=headers)
         except httpx.TransportError as exc:
             last_exc = exc
             if is_last_attempt:

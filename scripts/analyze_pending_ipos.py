@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
-"""Ollama analysis MVP: turn a matched IPO's deterministic extracted facts
+"""Gemini analysis MVP: turn a matched IPO's deterministic extracted facts
 and cached KAP PDF text into a structured Turkish decision-support
-summary, using a local Ollama model.
+summary, using the Gemini API.
 
 Usage:
     uv run python scripts/analyze_pending_ipos.py
     uv run python scripts/analyze_pending_ipos.py --ticker QUICK
 
-Requires a running local Ollama server (``OLLAMA_BASE_URL``, default
-http://localhost:11434) with a model already pulled (``OLLAMA_MODEL``,
-required — see .env.example). This command never downloads a KAP
+Requires ``GEMINI_API_KEY`` (see .env.example — get one from
+https://aistudio.google.com/apikey). This command never downloads a KAP
 document itself: it only analyzes documents an earlier
 ``uv run python scripts/fetch_kap_disclosures.py --parse-documents`` run
 already cached under data/cache/kap_pdfs/. A company with no cached,
 extractable PDF text is reported as insufficient_data, not skipped
 silently.
 
-No OCR, financial scoring formulas, Telegram changes, GitHub Actions
-integration, or news monitoring happen here.
+A transient failure analyzing one company (Gemini rate limit, quota,
+temporary server error) does not abort the run — that company is
+skipped (nothing is cached for it, so it's retried on a later run) and
+the rest continue. Only a total preflight failure (API unreachable, or
+the configured model unavailable) stops the whole run.
+
+No OCR, financial scoring formulas, Telegram changes, or news
+monitoring happen here. GitHub Actions only invokes this same script —
+no separate logic lives in the workflow.
 """
 
 from __future__ import annotations
@@ -31,6 +37,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from halka_arz_advisor.gemini.analysis import analyze_company, verify_gemini_ready  # noqa: E402
+from halka_arz_advisor.gemini.cache import AnalysisCache  # noqa: E402
+from halka_arz_advisor.gemini.client import GeminiClient  # noqa: E402
+from halka_arz_advisor.gemini.config import load_gemini_config_from_env  # noqa: E402
+from halka_arz_advisor.gemini.exceptions import GeminiError, GeminiUnavailableError  # noqa: E402
+from halka_arz_advisor.gemini.models import AnalysisRecord  # noqa: E402
 from halka_arz_advisor.kap.classification import target_document_types  # noqa: E402
 from halka_arz_advisor.kap.client import KapClient  # noqa: E402
 from halka_arz_advisor.kap.documents import DEFAULT_CACHE_DIR, aggregate_company_facts, process_disclosure_documents  # noqa: E402
@@ -39,18 +51,12 @@ from halka_arz_advisor.kap.matching import match_disclosure  # noqa: E402
 from halka_arz_advisor.kap.models import KapDisclosure  # noqa: E402
 from halka_arz_advisor.kap.pdf import PdfCache  # noqa: E402
 from halka_arz_advisor.notify.env import load_dotenv_if_present  # noqa: E402
-from halka_arz_advisor.ollama.analysis import analyze_company, verify_ollama_ready  # noqa: E402
-from halka_arz_advisor.ollama.cache import AnalysisCache  # noqa: E402
-from halka_arz_advisor.ollama.client import OllamaClient  # noqa: E402
-from halka_arz_advisor.ollama.config import load_ollama_config_from_env  # noqa: E402
-from halka_arz_advisor.ollama.exceptions import OllamaError  # noqa: E402
-from halka_arz_advisor.ollama.models import AnalysisRecord  # noqa: E402
 from halka_arz_advisor.probe.config import ProbeConfig  # noqa: E402
 from halka_arz_advisor.spk.application_list import SpkApplicationListClient  # noqa: E402
 from halka_arz_advisor.spk.client import SpkApiClient  # noqa: E402
 from halka_arz_advisor.spk.exceptions import SpkApiError  # noqa: E402
 
-DEFAULT_ANALYSIS_CACHE_DIR = Path("data") / "cache" / "ollama_analysis"
+DEFAULT_ANALYSIS_CACHE_DIR = Path("data") / "cache" / "llm_analysis"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -103,8 +109,8 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv_if_present(args.env_file)
 
     try:
-        ollama_config = load_ollama_config_from_env()
-    except OllamaError as exc:
+        gemini_config = load_gemini_config_from_env()
+    except GeminiError as exc:
         print(f"FAILED: {exc}", file=sys.stderr)
         return 1
 
@@ -165,19 +171,19 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"{len(company_facts)} compan(y/ies) with cached documents ready for analysis", file=sys.stderr)
 
-    print("Checking Ollama availability and configured model...", file=sys.stderr)
-    ollama_client = OllamaClient(ollama_config)
+    print("Checking Gemini availability and configured model...", file=sys.stderr)
+    gemini_client = GeminiClient(gemini_config)
     try:
-        verify_ollama_ready(ollama_client)
-    except OllamaError as exc:
-        print(f"Ollama not ready: {type(exc).__name__}: {exc}", file=sys.stderr)
-        ollama_client.close()
+        verify_gemini_ready(gemini_client)
+    except GeminiError as exc:
+        print(f"Gemini not ready: {type(exc).__name__}: {exc}", file=sys.stderr)
+        gemini_client.close()
         now = datetime.now(UTC)
         records = [
             AnalysisRecord(
                 spk_record_id=record_id,
                 llm_status="model_unavailable",
-                llm_model=ollama_config.model,
+                llm_model=gemini_config.model,
                 llm_analysis=None,
                 llm_warnings=(str(exc),),
                 analyzed_at=now,
@@ -189,28 +195,39 @@ def main(argv: list[str] | None = None) -> int:
 
     analysis_cache = AnalysisCache(args.analysis_cache_dir)
     results: list[AnalysisRecord] = []
+    skipped_transient = 0
     for record_id, facts in company_facts.items():
         disclosures_for_company = disclosures_by_record.get(record_id, [])
         company_name, ticker = _infer_company_name_and_ticker(record_id, disclosures_for_company)
         print(f"Analyzing {record_id} ({company_name})...", file=sys.stderr)
-        record = analyze_company(
-            spk_record_id=record_id,
-            company_name=company_name,
-            ticker=ticker,
-            facts=facts,
-            disclosures=disclosures_for_company,
-            pdf_cache=pdf_cache,
-            analysis_cache=analysis_cache,
-            ollama_client=ollama_client,
-        )
+        try:
+            record = analyze_company(
+                spk_record_id=record_id,
+                company_name=company_name,
+                ticker=ticker,
+                facts=facts,
+                disclosures=disclosures_for_company,
+                pdf_cache=pdf_cache,
+                analysis_cache=analysis_cache,
+                gemini_client=gemini_client,
+            )
+        except GeminiUnavailableError as exc:
+            # Rate limit / quota / temporary server error for this one
+            # company — nothing was cached, so it's simply retried on the
+            # next (hourly) run. Does not abort the batch.
+            print(f"  -> skipped (temporary Gemini error): {exc}", file=sys.stderr)
+            skipped_transient += 1
+            continue
         print(f"  -> {record.llm_status}", file=sys.stderr)
         results.append(record)
 
-    ollama_client.close()
+    gemini_client.close()
 
     status_counts: dict[str, int] = {}
     for record in results:
         status_counts[record.llm_status] = status_counts.get(record.llm_status, 0) + 1
+    if skipped_transient:
+        status_counts["skipped_transient"] = skipped_transient
     print(f"Status breakdown: {status_counts}", file=sys.stderr)
 
     print(json.dumps([_record_to_json(r) for r in results], indent=2, ensure_ascii=False))

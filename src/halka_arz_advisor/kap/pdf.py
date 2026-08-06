@@ -133,7 +133,7 @@ def download_pdf(
 
     If ``cache_only`` is set, a cache miss is reported as
     ``"unavailable"`` immediately — no network request is made. Used by
-    the Ollama analysis layer, which must only ever analyze documents
+    the Gemini analysis layer, which must only ever analyze documents
     already downloaded by a prior ``--parse-documents`` run.
     """
     if cache is not None:

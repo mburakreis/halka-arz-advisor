@@ -1,5 +1,5 @@
 """Select page-aware, category-labeled text sections from a company's
-cached KAP PDFs for the Ollama prompt.
+cached KAP PDFs for the Gemini prompt.
 
 Two hard rules from the brief, both enforced here:
 

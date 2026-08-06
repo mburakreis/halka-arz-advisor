@@ -1,8 +1,8 @@
-"""Builds the Turkish-language prompt sent to Ollama.
+"""Builds the Turkish-language prompt sent to Gemini.
 
 Embeds the deterministic :class:`~halka_arz_advisor.kap.extraction.ExtractedFacts`
 as authoritative ground truth (explicitly instructed not to be altered),
-and the selected page-aware :class:`~halka_arz_advisor.ollama.context.ContextSection`
+and the selected page-aware :class:`~halka_arz_advisor.gemini.context.ContextSection`
 list as the *only* source of prose material — plus explicit instructions
 matching every constraint in the brief (Turkish only, cite only supplied
 disclosure IDs/pages, never invent facts, ``insufficient_data`` when

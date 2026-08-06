@@ -58,7 +58,7 @@ def process_disclosure_documents(
     always resolved live — that's a small JSON call, not a document
     download. If ``cache_only`` is set, the PDF itself is only ever read
     from ``cache``; a cache miss is reported as ``pdf_status="unavailable"``
-    rather than triggering a download (used by the Ollama analysis layer,
+    rather than triggering a download (used by the Gemini analysis layer,
     which must only analyze documents an earlier ``--parse-documents``
     run already cached).
     """

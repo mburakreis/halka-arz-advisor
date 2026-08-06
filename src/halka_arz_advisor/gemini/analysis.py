@@ -1,7 +1,13 @@
-"""Orchestrates one company's Ollama analysis: build bounded context from
+"""Orchestrates one company's Gemini analysis: build bounded context from
 cached PDFs, check the analysis cache, prompt the model, validate its
 structured output (retrying once on invalid JSON/schema/citation
 failures), and cache the result.
+
+A transient failure (rate limit, quota, temporary server error — see
+:class:`~halka_arz_advisor.gemini.exceptions.GeminiUnavailableError`) is
+deliberately *not* caught here and not retried — it propagates so the
+caller (the CLI) can skip just this company without caching a bogus
+result, leaving it to be picked up again on a later run.
 """
 
 from __future__ import annotations
@@ -14,9 +20,9 @@ from ..kap.extraction import FIELD_NAMES, ExtractedFacts
 from ..kap.models import KapDisclosure
 from ..kap.pdf import PdfCache
 from .cache import AnalysisCache, compute_cache_key
-from .client import OllamaClient
+from .client import GeminiClient
 from .context import DEFAULT_MAX_TOTAL_CHARS, ContextSection, select_context_sections
-from .exceptions import OllamaOutputError
+from .exceptions import GeminiOutputError
 from .models import AnalysisRecord
 from .prompt import PROMPT_VERSION, allowed_source_references, build_prompt
 from .schema import ANALYSIS_JSON_SCHEMA, SCHEMA_VERSION, validate_analysis_output
@@ -24,12 +30,12 @@ from .schema import ANALYSIS_JSON_SCHEMA, SCHEMA_VERSION, validate_analysis_outp
 MAX_GENERATE_ATTEMPTS = 2
 
 
-def verify_ollama_ready(client: OllamaClient) -> None:
-    """Pre-flight checks required before any analysis: the server must be
-    reachable, and the configured model must actually be pulled.
+def verify_gemini_ready(client: GeminiClient) -> None:
+    """Pre-flight checks required before any analysis: the API must be
+    reachable, and the configured model must actually be available.
 
-    Raises :class:`~halka_arz_advisor.ollama.exceptions.OllamaUnavailableError`
-    or :class:`~halka_arz_advisor.ollama.exceptions.OllamaModelNotFoundError`
+    Raises :class:`~halka_arz_advisor.gemini.exceptions.GeminiUnavailableError`
+    or :class:`~halka_arz_advisor.gemini.exceptions.GeminiModelNotFoundError`
     — callers should treat either as "no analysis can run right now" and
     should not attempt to call :func:`analyze_company`.
     """
@@ -64,20 +70,21 @@ def analyze_company(
     disclosures: list[KapDisclosure],
     pdf_cache: PdfCache,
     analysis_cache: AnalysisCache,
-    ollama_client: OllamaClient,
+    gemini_client: GeminiClient,
     max_total_chars: int = DEFAULT_MAX_TOTAL_CHARS,
 ) -> AnalysisRecord:
     """Analyze one company (one matched SPK record).
 
-    Assumes :func:`verify_ollama_ready` has already succeeded for
-    ``ollama_client`` — this does not re-check reachability/model
-    availability itself, so a transport failure here propagates as a
-    genuine hard error rather than being silently downgraded.
+    Assumes :func:`verify_gemini_ready` has already succeeded for
+    ``gemini_client`` — this does not re-check reachability/model
+    availability itself, so a transport/rate-limit failure here
+    propagates as a genuine (expected-transient) error rather than being
+    silently downgraded.
 
     Reads PDF text purely from ``pdf_cache`` (see
-    :mod:`halka_arz_advisor.ollama.context`) — never downloads. If none
+    :mod:`halka_arz_advisor.gemini.context`) — never downloads. If none
     of the company's cached documents have extractable text,
-    ``llm_status="insufficient_data"`` is returned without calling Ollama
+    ``llm_status="insufficient_data"`` is returned without calling Gemini
     at all.
     """
     sections = select_context_sections(disclosures, pdf_cache, max_total_chars=max_total_chars)
@@ -86,7 +93,7 @@ def analyze_company(
         return AnalysisRecord(
             spk_record_id=spk_record_id,
             llm_status="insufficient_data",
-            llm_model=ollama_client.model_name,
+            llm_model=gemini_client.model_name,
             llm_analysis=None,
             llm_warnings=("no extractable PDF text available in the cache for this company's documents",),
             analyzed_at=datetime.now(UTC),
@@ -95,7 +102,7 @@ def analyze_company(
     content_hash = compute_document_content_hash(facts=facts, sections=sections)
     cache_key = compute_cache_key(
         document_content_hash=content_hash,
-        model_name=ollama_client.model_name,
+        model_name=gemini_client.model_name,
         prompt_version=PROMPT_VERSION,
         schema_version=SCHEMA_VERSION,
     )
@@ -112,14 +119,15 @@ def analyze_company(
     output = None
 
     for attempt in range(1, MAX_GENERATE_ATTEMPTS + 1):
-        # A transport/response failure here is a hard error and propagates —
-        # only invalid-JSON/schema/citation failures are retried below.
-        raw_response_text = ollama_client.generate(prompt, format_schema=ANALYSIS_JSON_SCHEMA)
+        # A transport/rate-limit failure here is expected-transient and
+        # propagates — only invalid-JSON/schema/citation failures are
+        # retried below.
+        raw_response_text = gemini_client.generate(prompt, format_schema=ANALYSIS_JSON_SCHEMA)
         try:
             parsed = json.loads(raw_response_text)
             output = validate_analysis_output(parsed, allowed_references=allowed_refs)
             break
-        except (json.JSONDecodeError, OllamaOutputError) as exc:
+        except (json.JSONDecodeError, GeminiOutputError) as exc:
             warnings.append(f"attempt {attempt}: {exc}")
             continue
 
@@ -127,7 +135,7 @@ def analyze_company(
         record = AnalysisRecord(
             spk_record_id=spk_record_id,
             llm_status="invalid_output",
-            llm_model=ollama_client.model_name,
+            llm_model=gemini_client.model_name,
             llm_analysis=None,
             llm_warnings=tuple(warnings),
             analyzed_at=datetime.now(UTC),
@@ -142,7 +150,7 @@ def analyze_company(
     record = AnalysisRecord(
         spk_record_id=spk_record_id,
         llm_status="completed",
-        llm_model=ollama_client.model_name,
+        llm_model=gemini_client.model_name,
         llm_analysis=output,
         llm_warnings=tuple(warnings),
         analyzed_at=datetime.now(UTC),

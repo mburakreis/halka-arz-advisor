@@ -1,9 +1,9 @@
-"""JSON schema for the Ollama structured-output analysis, and Python-side
+"""JSON schema for the Gemini structured-output analysis, and Python-side
 validation of the model's response against it.
 
 Validation deliberately does more than the JSON Schema alone can express
-via Ollama's ``format`` parameter: it also cross-checks every
-``source_references`` entry against the exact ``(disclosure_id,
+via Gemini's ``response_json_schema`` parameter: it also cross-checks
+every ``source_references`` entry against the exact ``(disclosure_id,
 page_number)`` pairs that were actually included in the prompt's
 context — the model constraining its *shape* to the schema doesn't stop
 it from citing a page or disclosure it was never shown, so that's
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .exceptions import OllamaOutputError
+from .exceptions import GeminiOutputError
 
 SCHEMA_VERSION = "1"
 
@@ -121,7 +121,7 @@ class AnalysisOutput:
 def validate_analysis_output(data: object, *, allowed_references: set[tuple[str, int]]) -> AnalysisOutput:
     """Validate a parsed JSON object against the analysis schema.
 
-    Raises :class:`~halka_arz_advisor.ollama.exceptions.OllamaOutputError`
+    Raises :class:`~halka_arz_advisor.gemini.exceptions.GeminiOutputError`
     — with a specific, actionable reason — for any structural problem: a
     non-object top level, a missing or wrong-typed field, an
     out-of-enum ``participation_signal``, a ``confidence`` outside
@@ -130,26 +130,26 @@ def validate_analysis_output(data: object, *, allowed_references: set[tuple[str,
     ``allowed_references`` — i.e. wasn't actually sent to the model.
     """
     if not isinstance(data, dict):
-        raise OllamaOutputError(f"expected a JSON object, got {type(data).__name__}")
+        raise GeminiOutputError(f"expected a JSON object, got {type(data).__name__}")
 
     missing = [key for key in _REQUIRED_KEYS if key not in data]
     if missing:
-        raise OllamaOutputError(f"response is missing required field(s): {missing}")
+        raise GeminiOutputError(f"response is missing required field(s): {missing}")
 
     for field_name in _STRING_FIELDS:
         if not isinstance(data[field_name], str):
-            raise OllamaOutputError(
+            raise GeminiOutputError(
                 f"field '{field_name}' must be a string, got {type(data[field_name]).__name__}"
             )
 
     for field_name in _LIST_OF_STRING_FIELDS:
         value = data[field_name]
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-            raise OllamaOutputError(f"field '{field_name}' must be a list of strings")
+            raise GeminiOutputError(f"field '{field_name}' must be a list of strings")
 
     signal = data["participation_signal"]
     if signal not in PARTICIPATION_SIGNAL_VALUES:
-        raise OllamaOutputError(
+        raise GeminiOutputError(
             f"field 'participation_signal' must be one of {PARTICIPATION_SIGNAL_VALUES}, got {signal!r}"
         )
 
@@ -159,11 +159,11 @@ def validate_analysis_output(data: object, *, allowed_references: set[tuple[str,
         or isinstance(confidence, bool)
         or not (0.0 <= float(confidence) <= 1.0)
     ):
-        raise OllamaOutputError(f"field 'confidence' must be a number between 0 and 1, got {confidence!r}")
+        raise GeminiOutputError(f"field 'confidence' must be a number between 0 and 1, got {confidence!r}")
 
     raw_references = data["source_references"]
     if not isinstance(raw_references, list):
-        raise OllamaOutputError("field 'source_references' must be a list")
+        raise GeminiOutputError("field 'source_references' must be a list")
 
     references: list[SourceReference] = []
     for i, item in enumerate(raw_references):
@@ -173,14 +173,14 @@ def validate_analysis_output(data: object, *, allowed_references: set[tuple[str,
             or not isinstance(item.get("page_number"), int)
             or isinstance(item.get("page_number"), bool)
         ):
-            raise OllamaOutputError(
+            raise GeminiOutputError(
                 f"source_references[{i}] must be an object with a string 'disclosure_id' "
                 "and integer 'page_number'"
             )
         disclosure_id = item["disclosure_id"]
         page_number = item["page_number"]
         if (disclosure_id, page_number) not in allowed_references:
-            raise OllamaOutputError(
+            raise GeminiOutputError(
                 f"source_references[{i}] cites disclosure_id={disclosure_id!r} page={page_number}, "
                 "which was not part of the supplied context — rejecting invented citation"
             )

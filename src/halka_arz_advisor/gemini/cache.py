@@ -1,4 +1,4 @@
-"""Disk cache for Ollama analysis results.
+"""Disk cache for Gemini analysis results.
 
 Keyed by a hash of ``(document_content_hash, model_name, prompt_version,
 schema_version)`` — change any one of those (the input text/facts, the

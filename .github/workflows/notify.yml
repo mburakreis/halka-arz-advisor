@@ -33,6 +33,38 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: uv run python scripts/check_and_notify.py --state-file state/seen_records.json
 
+      # KAP PDFs and Gemini analysis results are pure caches (like the
+      # rest of data/cache/*, gitignored — see .gitignore), not
+      # notification state, so they persist across runs via the
+      # Actions cache rather than being committed to the repo like
+      # state/seen_records.json below. Restored here, saved
+      # automatically at the end of the job.
+      - name: Restore KAP PDF and Gemini analysis caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/cache/kap_pdfs
+            data/cache/llm_analysis
+          key: llm-analysis-cache-${{ github.run_id }}
+          restore-keys: |
+            llm-analysis-cache-
+
+      - name: Fetch and cache KAP disclosure documents
+        run: uv run python scripts/fetch_kap_disclosures.py --parse-documents > /dev/null
+
+      - name: Run Gemini analysis for pending IPOs
+        # A quota/rate-limit/temporary Gemini error must not fail the
+        # whole monitoring workflow — analyze_pending_ipos.py already
+        # skips just the affected company per-record (see its
+        # GeminiUnavailableError handling), and pending companies are
+        # naturally retried on the next hourly run since nothing gets
+        # cached for a skipped/failed one. continue-on-error is a second
+        # layer of protection for a total-outage/full-preflight failure.
+        continue-on-error: true
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: uv run python scripts/analyze_pending_ipos.py > /dev/null
+
       - name: Commit updated state
         run: |
           git config user.name "github-actions[bot]"

@@ -1,6 +1,6 @@
-"""The stored result of one Ollama analysis run for one matched IPO
+"""The stored result of one Gemini analysis run for one matched IPO
 (one SPK record, i.e. one company — not one KAP disclosure; see
-:mod:`halka_arz_advisor.ollama.analysis`, which aggregates a company's
+:mod:`halka_arz_advisor.gemini.analysis`, which aggregates a company's
 matched disclosures before analyzing)."""
 
 from __future__ import annotations

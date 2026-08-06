@@ -30,6 +30,12 @@ _FACT_LABELS_TR: dict[str, str] = {
     "secondary_sale_ratio": "Ortak satış oranı (%)",
     "use_of_proceeds": "Fon kullanım yeri (izahnameden)",
     "key_risk_items": "Risk faktörleri (izahnameden)",
+    "total_participant_count": "Toplam yatırımcı sayısı (halka arz sonuçlarından)",
+    "retail_participant_count": "Bireysel yatırımcı sayısı (halka arz sonuçlarından)",
+    "total_demand_multiple": "Genel talep/arz katı (halka arz sonuçlarından)",
+    "retail_demand_multiple": "Bireysel yatırımcı talep katı (halka arz sonuçlarından)",
+    "retail_allocated_shares": "Bireysel yatırımcılara dağıtılan pay tutarı (halka arz sonuçlarından)",
+    "institutional_allocated_shares": "Kurumsal yatırımcılara dağıtılan pay tutarı (halka arz sonuçlarından)",
 }
 
 

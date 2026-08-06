@@ -12,9 +12,12 @@ from halka_arz_advisor.kap.extraction import (
     extract_key_risk_items,
     extract_observations_from_pages,
     extract_offering_price,
+    extract_retail_allocated_shares,
+    extract_retail_demand_multiple,
     extract_secondary_sale_ratio,
     extract_secondary_sale_shares,
     extract_subscription_dates,
+    extract_total_demand_multiple,
     extract_total_offered_shares,
     extract_use_of_proceeds,
     merge_field_observations,
@@ -337,3 +340,55 @@ def test_build_extracted_facts_merges_both_sides():
     assert facts.offering_price.status == "extracted"
     assert facts.offering_price.value == 76.6
     assert facts.subscription_start_date.status == "not_found"
+
+
+# --------------------------------------------------------------------------
+# IPO results fields (post-offer) — one success, one missing, one
+# conflicting, one provenance-preservation check.
+# --------------------------------------------------------------------------
+
+_IPO_RESULTS_TEXT = (
+    "Halka arzda, halka arz edilen 85.000.000 TL nominal değerli payların 4,98 katına denk gelen "
+    "422.947.704 TL nominal değerli filtrelenmemiş pay talebi gelmiştir. Yurt İçi Bireysel "
+    "Yatırımcılara tahsisat tutarının yaklaşık 1,48 katı talep gelmiştir.\n"
+    "Yurt İçi Bireysel \nYatırımcılar 68.000.000 80,0% 1.120.538 100.300.410 23.7% 1.089.645 68.000.000 80,0%"
+)
+
+
+def test_ipo_results_extraction_succeeds_for_a_real_narrative_sentence():
+    value, snippet = extract_total_demand_multiple(_IPO_RESULTS_TEXT)
+    assert value == 4.98
+    assert "katına denk gelen" in snippet
+
+
+def test_ipo_results_field_is_missing_when_not_stated():
+    assert extract_retail_allocated_shares("bu belgede dağıtım bilgisi yoktur") is None
+
+
+def test_ipo_results_conflicting_observation_is_not_silently_picked():
+    # An original vs. an amended/corrected results filing disagreeing on
+    # the same field — merge_field_observations must not silently prefer
+    # one; both observations stay attached for provenance.
+    src_original = SourceRef("ipo_results", "disc-original", "url-1", 1)
+    src_amended = SourceRef("ipo_results", "disc-amended", "url-2", 1)
+    original = FieldObservation(value=1.48, raw_snippet="1,48 katı", source=src_original)
+    amended = FieldObservation(value=1.55, raw_snippet="1,55 katı", source=src_amended)
+
+    fact = merge_field_observations("retail_demand_multiple", None, original, amended)
+
+    assert fact.status == "conflicting"
+    assert fact.value is None
+    assert set(fact.observations) == {original, amended}
+
+
+def test_ipo_results_provenance_is_preserved():
+    page = PdfPage(number=1, text=_IPO_RESULTS_TEXT)
+    observations = extract_observations_from_pages(
+        [page], document_type="ipo_results", disclosure_id="d-results", attachment_url="https://example/results.pdf"
+    )
+    source = observations["total_demand_multiple"].source
+    assert source.document_type == "ipo_results"
+    assert source.disclosure_id == "d-results"
+    assert source.attachment_url == "https://example/results.pdf"
+    assert source.page_number == 1
+    assert source.extraction_method == "digital"

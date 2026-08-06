@@ -53,6 +53,18 @@ FIELD_NAMES: tuple[str, ...] = (
     "secondary_sale_ratio",
     "use_of_proceeds",
     "key_risk_items",
+    # Post-offer fields, sourced from the IPO results disclosure
+    # ("Halka Arzına İlişkin Sonuçlar") — never from the prospectus or
+    # investor sale announcement, so they're outside
+    # ANNOUNCEMENT_PRIORITY_FIELDS/PROSPECTUS_PRIORITY_FIELDS below (no
+    # two-document priority rule applies; see merge_field_observations's
+    # docstring for how a *third* source is merged).
+    "total_participant_count",
+    "retail_participant_count",
+    "total_demand_multiple",
+    "retail_demand_multiple",
+    "retail_allocated_shares",
+    "institutional_allocated_shares",
 )
 
 # Per rule 8 of the brief: which document type wins when both the
@@ -348,6 +360,113 @@ def extract_currency(text: str) -> tuple[str, str] | None:
 
 
 # --------------------------------------------------------------------------
+# IPO results ("Halka Arzına İlişkin Sonuçlar") — post-offer fields.
+#
+# Patterns below are confirmed against two real, independently-brokered
+# results filings (QUICK/Garanti Yatırım, MASFN/Deniz Yatırım) — the
+# narrative sentences are worded near-identically across both ("payların
+# N katına denk gelen ... talebi gelmiştir", "Bireysel Yatırımcılara
+# (planlanan) tahsisat tutarının (yaklaşık) N katı"), which is why those
+# fields are matched from narrative text.
+#
+# retail_participant_count/retail_allocated_shares/
+# institutional_allocated_shares instead come from the per-investor-group
+# results table. That table's *column labels* are not standardized
+# across brokerages (QUICK: "Yatırımcı Sayısı" / "Nominal Değer (TL)";
+# MASFN: "Başvuru Sayısı" / "Pay Adedi" / "Talep Edilen Nominal Tutar
+# (TL)") but pypdf's linear text extraction of both real tables reduces
+# each investor-group row to the *same* fixed shape once the group label
+# is matched: 8 numeric/percent tokens in "Planlanan Tahsisat, Talep,
+# Dağıtım" order. Position 2 (the row's 3rd token) was confirmed against
+# QUICK's own narrative ("toplam 589.692 yatırımcıdan") to equal the
+# *combined* investor headcount across every row, and independently
+# against MASFN's table arithmetic (1.120.538 + 4.235 + 72 = 1.124.845,
+# the "Toplam" row's own position-2 value) — so it's each row's
+# investor/application headcount, not a guess. Position 6 (the 7th
+# token, immediately before the row's closing percentage) is the
+# "Dağıtım" (final allocated) nominal amount in both samples. A results
+# table with a different row shape (a different number of tokens between
+# the group label and the next one) simply won't match — never guessed.
+_TABLE_TOKEN = r"[%\d][\d.,%]*"
+
+
+def extract_total_participant_count(text: str) -> tuple[float, str] | None:
+    folded = fold_turkish(text)
+    found = _search(folded, text, _re(rf"toplam\s+({_NUM})\s+yatirimcidan"))
+    if not found:
+        return None
+    value_text, snippet = found
+    value = parse_turkish_number(value_text)
+    return (value, snippet) if value is not None else None
+
+
+def extract_total_demand_multiple(text: str) -> tuple[float, str] | None:
+    folded = fold_turkish(text)
+    found = _search(folded, text, _re(rf"({_NUM})\s*katina\s+denk\s+gelen"))
+    if not found:
+        return None
+    value_text, snippet = found
+    value = parse_turkish_number(value_text)
+    return (value, snippet) if value is not None else None
+
+
+def extract_retail_demand_multiple(text: str) -> tuple[float, str] | None:
+    folded = fold_turkish(text)
+    found = _search(
+        folded,
+        text,
+        _re(rf"bireysel\s+yatirimcilara\s+(?:planlanan\s+)?tahsisat\s+tutarinin\s+(?:yaklasik\s+)?({_NUM})\s*kati"),
+    )
+    if not found:
+        return None
+    value_text, snippet = found
+    value = parse_turkish_number(value_text)
+    return (value, snippet) if value is not None else None
+
+
+def _extract_investor_group_row(text: str, folded_group_label: str) -> tuple[float | None, float | None, str] | None:
+    """Match one investor-group row in the results table; returns
+    ``(participant_count, allocated_shares, snippet)`` — either count may
+    individually be ``None`` if its token didn't parse as a number, but
+    the row match itself (the label followed by exactly this token
+    shape) either succeeds or doesn't."""
+    folded = fold_turkish(text)
+    pattern = re.compile(
+        rf"{folded_group_label}\s+yatirimcilar\w*\s+{_TABLE_TOKEN}\s+{_TABLE_TOKEN}\s+({_NUM})\s+"
+        rf"{_TABLE_TOKEN}\s+{_TABLE_TOKEN}\s+{_TABLE_TOKEN}\s+({_NUM})\s+{_TABLE_TOKEN}",
+        re.IGNORECASE,
+    )
+    match = pattern.search(folded)
+    if not match:
+        return None
+    snippet = text[match.start() : match.end()]
+    participant_count = parse_turkish_number(text[match.start(1) : match.end(1)])
+    allocated_shares = parse_turkish_number(text[match.start(2) : match.end(2)])
+    return participant_count, allocated_shares, snippet
+
+
+def extract_retail_participant_count(text: str) -> tuple[float, str] | None:
+    row = _extract_investor_group_row(text, "bireysel")
+    if row is None or row[0] is None:
+        return None
+    return row[0], row[2]
+
+
+def extract_retail_allocated_shares(text: str) -> tuple[float, str] | None:
+    row = _extract_investor_group_row(text, "bireysel")
+    if row is None or row[1] is None:
+        return None
+    return row[1], row[2]
+
+
+def extract_institutional_allocated_shares(text: str) -> tuple[float, str] | None:
+    row = _extract_investor_group_row(text, "kurumsal")
+    if row is None or row[1] is None:
+        return None
+    return row[1], row[2]
+
+
+# --------------------------------------------------------------------------
 # Orchestration: pages -> per-field observations (with provenance) -> merge
 # --------------------------------------------------------------------------
 
@@ -360,6 +479,12 @@ _SCALAR_EXTRACTORS: tuple[tuple[str, Callable[[str], tuple[object, str] | None]]
     ("total_offered_shares", extract_total_offered_shares),
     ("capital_increase_ratio", extract_capital_increase_ratio),
     ("secondary_sale_ratio", extract_secondary_sale_ratio),
+    ("total_participant_count", extract_total_participant_count),
+    ("retail_participant_count", extract_retail_participant_count),
+    ("total_demand_multiple", extract_total_demand_multiple),
+    ("retail_demand_multiple", extract_retail_demand_multiple),
+    ("retail_allocated_shares", extract_retail_allocated_shares),
+    ("institutional_allocated_shares", extract_institutional_allocated_shares),
 )
 
 _LIST_EXTRACTORS: tuple[tuple[str, Callable[[str], list[tuple[str, str]] | None]], ...] = (
@@ -440,46 +565,52 @@ def merge_field_observations(
     field_name: str,
     prospectus_observation: FieldObservation | None,
     announcement_observation: FieldObservation | None,
+    ipo_results_observation: FieldObservation | None = None,
 ) -> ExtractedFact:
-    """Combine what the prospectus and the investor sale announcement each
-    said about one field into a single :class:`ExtractedFact`.
+    """Combine what each source document said about one field into a
+    single :class:`ExtractedFact`.
 
-    - Neither has it -> ``not_found``.
-    - Only one has it -> that one, ``extracted``.
-    - Both have it and **agree** -> ``extracted``, using whichever
-      document rule 8 of the brief prefers for this field, but keeping
-      *both* observations for provenance.
-    - Both have it and **disagree** -> ``conflicting``; no value is
-      silently picked, both observations are kept.
+    - None have it -> ``not_found``.
+    - Exactly one has it -> that one, ``extracted``.
+    - More than one has it and they **agree** -> ``extracted``, using
+      whichever document rule 8 of the brief prefers for this field
+      (only meaningful when both the prospectus and the announcement
+      have it — ``ipo_results_observation`` has no such priority rule,
+      since it never overlaps with the other two in practice: the
+      results-only fields are never extracted from the prospectus or
+      announcement, and vice versa), but keeping *every* observation
+      for provenance.
+    - More than one has it and they **disagree** -> ``conflicting``; no
+      value is silently picked, every observation is kept.
     """
-    if prospectus_observation is None and announcement_observation is None:
+    observations = tuple(
+        obs for obs in (prospectus_observation, announcement_observation, ipo_results_observation) if obs is not None
+    )
+    if not observations:
         return _not_found()
 
-    if prospectus_observation is not None and announcement_observation is not None:
-        observations = (prospectus_observation, announcement_observation)
-        if prospectus_observation.value == announcement_observation.value:
-            winner = (
-                announcement_observation
-                if field_name in ANNOUNCEMENT_PRIORITY_FIELDS
-                else prospectus_observation
-            )
-            return ExtractedFact(
-                status="extracted",
-                value=winner.value,
-                raw_snippet=winner.raw_snippet,
-                source=winner.source,
-                observations=observations,
-            )
+    if len(observations) == 1:
+        single = observations[0]
+        return ExtractedFact(
+            status="extracted", value=single.value, raw_snippet=single.raw_snippet, source=single.source,
+            observations=observations,
+        )
+
+    # Compared with == (not a set/hash) since a value can be an
+    # unhashable list (use_of_proceeds/key_risk_items).
+    if any(obs.value != observations[0].value for obs in observations[1:]):
         return ExtractedFact(status="conflicting", value=None, raw_snippet=None, source=None, observations=observations)
 
-    single = prospectus_observation or announcement_observation
-    assert single is not None
+    # Every present observation agrees on the value.
+    if announcement_observation is not None and field_name in ANNOUNCEMENT_PRIORITY_FIELDS:
+        winner = announcement_observation
+    elif prospectus_observation is not None:
+        winner = prospectus_observation
+    else:
+        winner = observations[0]
     return ExtractedFact(
-        status="extracted",
-        value=single.value,
-        raw_snippet=single.raw_snippet,
-        source=single.source,
-        observations=(single,),
+        status="extracted", value=winner.value, raw_snippet=winner.raw_snippet, source=winner.source,
+        observations=observations,
     )
 
 
@@ -497,6 +628,12 @@ class ExtractedFacts:
     secondary_sale_ratio: ExtractedFact
     use_of_proceeds: ExtractedFact
     key_risk_items: ExtractedFact
+    total_participant_count: ExtractedFact
+    retail_participant_count: ExtractedFact
+    total_demand_multiple: ExtractedFact
+    retail_demand_multiple: ExtractedFact
+    retail_allocated_shares: ExtractedFact
+    institutional_allocated_shares: ExtractedFact
 
     def as_dict(self) -> dict[str, ExtractedFact]:
         return {name: getattr(self, name) for name in FIELD_NAMES}
@@ -505,15 +642,22 @@ class ExtractedFacts:
 def build_extracted_facts(
     prospectus_observations: dict[str, FieldObservation] | None,
     announcement_observations: dict[str, FieldObservation] | None,
+    ipo_results_observations: dict[str, FieldObservation] | None = None,
 ) -> ExtractedFacts:
-    """Merge one document's worth of prospectus observations and one
-    document's worth of announcement observations into the final,
-    per-field :class:`ExtractedFacts` (see :func:`merge_field_observations`)."""
+    """Merge one document's worth of prospectus observations, one
+    document's worth of announcement observations, and (optional, for
+    the post-offer fields) one document's worth of IPO results
+    observations into the final, per-field :class:`ExtractedFacts` (see
+    :func:`merge_field_observations`)."""
     prospectus_observations = prospectus_observations or {}
     announcement_observations = announcement_observations or {}
+    ipo_results_observations = ipo_results_observations or {}
     merged = {
         field_name: merge_field_observations(
-            field_name, prospectus_observations.get(field_name), announcement_observations.get(field_name)
+            field_name,
+            prospectus_observations.get(field_name),
+            announcement_observations.get(field_name),
+            ipo_results_observations.get(field_name),
         )
         for field_name in FIELD_NAMES
     }

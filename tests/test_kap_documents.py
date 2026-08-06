@@ -130,16 +130,18 @@ def test_no_disclosure_index_skips_network_entirely(httpx_mock):
 
 
 def test_extraction_skipped_for_non_eligible_document_type(httpx_mock, build_pdf_bytes):
-    """price_determination_report/ipo_results/trading_start get attachments
-    resolved and their PDF read, but field extraction is not attempted —
-    rule 6 scopes extraction to the prospectus and investor announcement only."""
+    """price_determination_report/trading_start get attachments resolved
+    and their PDF read, but field extraction is not attempted — rule 6
+    scopes extraction to the prospectus, investor announcement, and IPO
+    results disclosure only (ipo_results is covered separately, see
+    test_ipo_results_extraction_populates_post_offer_fields)."""
     httpx_mock.add_response(
-        url=DETAIL_URL, json=_detail_payload([{"objId": "obj-4", "fileName": "Sonuclar.pdf", "fileExtension": "pdf"}])
+        url=DETAIL_URL, json=_detail_payload([{"objId": "obj-4", "fileName": "Rapor.pdf", "fileExtension": "pdf"}])
     )
     pdf_bytes = build_pdf_bytes(text="belirlenen 76,60 TL")  # would match if extraction ran
     httpx_mock.add_response(url=FILE_DOWNLOAD_URL_TEMPLATE.format(obj_id="obj-4"), content=_java_wrap(pdf_bytes))
 
-    result = process_disclosure_documents(_disclosure(document_type="ipo_results"), config=fast_config())
+    result = process_disclosure_documents(_disclosure(document_type="price_determination_report"), config=fast_config())
 
     assert result.pdf_status == "ok"
     assert result.extracted_facts is None

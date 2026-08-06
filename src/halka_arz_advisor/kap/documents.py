@@ -36,11 +36,16 @@ from .pdf import PdfCache, fetch_and_read_pdf
 
 DEFAULT_CACHE_DIR = Path("data") / "cache" / "kap_pdfs"
 
-# Rule 6 of the brief scopes field extraction to these two document
-# types only — a Fiyat Tespit Raporu, for instance, is fetched and its
-# attachment resolved like any other target type, but its text is never
-# run through the field extractors.
-_EXTRACTION_ELIGIBLE_TYPES = frozenset({"approved_prospectus", "investor_sale_announcement"})
+# Rule 6 of the brief scopes field extraction to the prospectus and
+# investor sale announcement, plus (for the post-offer participation
+# fields — see kap.extraction's IPO-results section) the IPO results
+# disclosure ("Halka Arzına İlişkin Sonuçlar"). A Fiyat Tespit Raporu,
+# for instance, is still fetched and its attachment resolved like any
+# other target type, but its text is never run through the field
+# extractors.
+_EXTRACTION_ELIGIBLE_TYPES = frozenset(
+    {"approved_prospectus", "investor_sale_announcement", "ipo_results"}
+)
 
 # pdf_status values OCR is attempted for — a digitally-readable PDF
 # ("ok") never touches OCR; "malformed"/"unavailable" mean there's no
@@ -166,10 +171,10 @@ def process_disclosure_documents(
         attachment_url=primary.url,
         extraction_method=extraction_method,
     )
-    is_prospectus = disclosure.document_type == "approved_prospectus"
     facts = build_extracted_facts(
-        observations if is_prospectus else None,
-        observations if not is_prospectus else None,
+        observations if disclosure.document_type == "approved_prospectus" else None,
+        observations if disclosure.document_type == "investor_sale_announcement" else None,
+        observations if disclosure.document_type == "ipo_results" else None,
     )
 
     warnings = () if observations else ("no target fields matched in the extracted text",)
@@ -178,7 +183,7 @@ def process_disclosure_documents(
 
 def aggregate_company_facts(disclosures: list[KapDisclosure]) -> dict[str, ExtractedFacts]:
     """Merge per-disclosure ``extracted_facts`` across a company's separate
-    prospectus and announcement disclosures, grouped by
+    prospectus, announcement, and IPO results disclosures, grouped by
     ``matched_spk_record_id`` — implementing rule 8's cross-document
     field-priority and conflict-detection rule, which a single
     :class:`KapDisclosure` (one document) can't express on its own.
@@ -188,6 +193,7 @@ def aggregate_company_facts(disclosures: list[KapDisclosure]) -> dict[str, Extra
     """
     prospectus_observations: dict[str, dict[str, FieldObservation]] = {}
     announcement_observations: dict[str, dict[str, FieldObservation]] = {}
+    ipo_results_observations: dict[str, dict[str, FieldObservation]] = {}
 
     for disclosure in disclosures:
         if disclosure.matched_spk_record_id is None or disclosure.extracted_facts is None:
@@ -197,6 +203,8 @@ def aggregate_company_facts(disclosures: list[KapDisclosure]) -> dict[str, Extra
             if disclosure.document_type == "approved_prospectus"
             else announcement_observations
             if disclosure.document_type == "investor_sale_announcement"
+            else ipo_results_observations
+            if disclosure.document_type == "ipo_results"
             else None
         )
         if bucket is None:
@@ -207,10 +215,12 @@ def aggregate_company_facts(disclosures: list[KapDisclosure]) -> dict[str, Extra
             if fact.status == "extracted" and field_name not in company_bucket:
                 company_bucket[field_name] = fact.observations[0]
 
-    record_ids = set(prospectus_observations) | set(announcement_observations)
+    record_ids = set(prospectus_observations) | set(announcement_observations) | set(ipo_results_observations)
     return {
         record_id: build_extracted_facts(
-            prospectus_observations.get(record_id), announcement_observations.get(record_id)
+            prospectus_observations.get(record_id),
+            announcement_observations.get(record_id),
+            ipo_results_observations.get(record_id),
         )
         for record_id in record_ids
     }

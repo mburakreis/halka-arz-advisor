@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# OS
+.DS_Store
+
+# Generated probe output (raw responses + reports change on every run)
+/data/raw/*
+/data/probe-results/*
+!/data/raw/.gitkeep
+!/data/probe-results/.gitkeep

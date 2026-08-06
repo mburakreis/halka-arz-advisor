@@ -1,0 +1,20 @@
+[project]
+name = "halka-arz-advisor"
+version = "0.1.0"
+description = "Phase 0: source discovery and validation for Turkish IPO (halka arz) data sources"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "beautifulsoup4>=4.12",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-httpx>=0.35",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.2,<0.12.0"]
+build-backend = "uv_build"

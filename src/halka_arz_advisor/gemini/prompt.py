@@ -36,6 +36,14 @@ _FACT_LABELS_TR: dict[str, str] = {
     "retail_demand_multiple": "Bireysel yatırımcı talep katı (halka arz sonuçlarından)",
     "retail_allocated_shares": "Bireysel yatırımcılara dağıtılan pay tutarı (halka arz sonuçlarından)",
     "institutional_allocated_shares": "Kurumsal yatırımcılara dağıtılan pay tutarı (halka arz sonuçlarından)",
+    "reported_post_money_market_cap": "Fiyat tespit raporunda belirtilen nihai piyasa değeri (mn $)",
+    "reported_enterprise_value": "Fiyat tespit raporunda belirtilen firma değeri (mn $)",
+    "reported_net_debt": "Fiyat tespit raporunda belirtilen net borç (mn $)",
+    "reported_pe": "Fiyat tespit raporunda belirtilen F/K çarpanı",
+    "reported_ev_ebitda": "Fiyat tespit raporunda belirtilen EV/EBITDA çarpanı",
+    "reported_ps": "Fiyat tespit raporunda belirtilen F/S (PD/S) çarpanı",
+    "reported_pb": "Fiyat tespit raporunda belirtilen PD/DD çarpanı",
+    "headline_discount_percentage": "Fiyat tespit raporunda belirtilen halka arz iskonto oranı (%)",
 }
 
 

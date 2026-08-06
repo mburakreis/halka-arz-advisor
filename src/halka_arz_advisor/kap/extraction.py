@@ -65,6 +65,19 @@ FIELD_NAMES: tuple[str, ...] = (
     "retail_demand_multiple",
     "retail_allocated_shares",
     "institutional_allocated_shares",
+    # Valuation-summary fields, sourced from the price determination
+    # report ("Fiyat Tespit Raporu") — never from the prospectus,
+    # announcement, or IPO results disclosure, so (like the ipo_results
+    # fields above) they never participate in the two-document priority
+    # rule and are outside ANNOUNCEMENT_PRIORITY_FIELDS/PROSPECTUS_PRIORITY_FIELDS.
+    "reported_post_money_market_cap",
+    "reported_enterprise_value",
+    "reported_net_debt",
+    "reported_pe",
+    "reported_ev_ebitda",
+    "reported_ps",
+    "reported_pb",
+    "headline_discount_percentage",
 )
 
 # Per rule 8 of the brief: which document type wins when both the
@@ -467,6 +480,150 @@ def extract_institutional_allocated_shares(text: str) -> tuple[float, str] | Non
 
 
 # --------------------------------------------------------------------------
+# Price determination report ("Fiyat Tespit Raporu") — valuation summary.
+#
+# Patterns confirmed against two real, independently-brokered reports
+# (QUICK/Garanti Yatırım, a sum-of-parts insurance holding valuation;
+# METEN/İnfo Yatırım, a single-business EV/EBITDA valuation). Only values
+# stated explicitly in the report's own summary tables/sentences are
+# matched — no multiple is computed, no peer is chosen, no DCF input is
+# read. Some fields are genuinely absent from a given report's summary
+# (e.g. QUICK never states a P/E or EV/EBITDA at the consolidated level,
+# since it's a sum-of-parts valuation) and correctly extract as not_found.
+#
+# "Halka arz satış fiyatı olarak belirlenen 76,60 TL, hesaplanan pay
+# başına fiyat olan 102,17 TL'ye göre %25,03 iskontoludur." (QUICK) and
+# "Halka Arz İskontosu -20%" (METEN) are the two headline-discount forms
+# observed; tried in that order.
+_DISCOUNT_NARRATIVE_RE = _re(rf"gore\s+%\s*({_NUM})\s*iskontoludur")
+_DISCOUNT_LABEL_RE = _re(rf"iskontosu\s*-?({_NUM})%")
+
+# "Nihai Değer 236,2" (METEN p.8) — the cleanest single statement of the
+# final post-discount market cap, tried first.
+_NIHAI_DEGER_RE = _re(rf"nihai\s+deger\s+({_NUM})")
+# "Piyasa Değeri 236,2 Net Borç 106,6 Firma Değeri 342,8" (METEN p.6) — a
+# report may restate this triple once per balance-sheet date it
+# considered (an earlier provisional one, then a final one); only the
+# LAST occurrence is used, confirmed against the surrounding "Bilanço
+# (m$) 2025/09" -> "2026/03" date labels and against page 8's
+# independent "Nihai Değer" statement (identical value).
+_TRIPLE_RE = _re(rf"piyasa\s+degeri\s+({_NUM})\s+net\s+borc\s+({_NUM})\s+firma\s+degeri\s+({_NUM})")
+
+# "F/K 29,4" (METEN p.8); negative lookbehind defensively excludes an
+# "EV/K"-shaped false positive (not observed live, but not a real ratio
+# either way).
+_PE_RE = _re(rf"(?<!ev\s)f\s*/\s*k\s+({_NUM})")
+_EV_EBITDA_RE = _re(rf"ev\s*/\s*ebitda\s+({_NUM})")
+# Deliberately narrow: must not match "EV/Net Satış" (EV/Sales, a
+# different ratio) — both real samples only ever state EV/Sales, never
+# P/S, so this correctly extracts not_found for both.
+_PS_RE = _re(rf"(?:f|pd)\s*/\s*s\s+({_NUM})")
+_PB_RE = _re(rf"pd\s*/\s*dd\s+({_NUM})")
+
+
+def extract_headline_discount_percentage(text: str) -> tuple[float, str] | None:
+    folded = fold_turkish(text)
+    found = _search(folded, text, _DISCOUNT_NARRATIVE_RE) or _search(folded, text, _DISCOUNT_LABEL_RE)
+    if not found:
+        return None
+    value_text, snippet = found
+    value = parse_turkish_number(value_text)
+    return (value, snippet) if value is not None else None
+
+
+def _find_valuation_triple_last(folded: str, text: str) -> tuple[str, str, str, str] | None:
+    """The LAST ``(market_cap_text, net_debt_text, enterprise_value_text,
+    snippet)`` match of :data:`_TRIPLE_RE`, or ``None``."""
+    matches = list(_TRIPLE_RE.finditer(folded))
+    if not matches:
+        return None
+    match = matches[-1]
+    snippet = text[match.start() : match.end()]
+    return (
+        text[match.start(1) : match.end(1)],
+        text[match.start(2) : match.end(2)],
+        text[match.start(3) : match.end(3)],
+        snippet,
+    )
+
+
+def extract_reported_post_money_market_cap(text: str) -> tuple[float, str] | None:
+    folded = fold_turkish(text)
+    found = _search(folded, text, _NIHAI_DEGER_RE)
+    if found:
+        value_text, snippet = found
+        value = parse_turkish_number(value_text)
+        if value is not None:
+            return value, snippet
+    triple = _find_valuation_triple_last(folded, text)
+    if triple is None:
+        return None
+    market_cap_text, _net_debt_text, _ev_text, snippet = triple
+    value = parse_turkish_number(market_cap_text)
+    return (value, snippet) if value is not None else None
+
+
+def extract_reported_enterprise_value(text: str) -> tuple[float, str] | None:
+    folded = fold_turkish(text)
+    triple = _find_valuation_triple_last(folded, text)
+    if triple is None:
+        return None
+    _market_cap_text, _net_debt_text, ev_text, snippet = triple
+    value = parse_turkish_number(ev_text)
+    return (value, snippet) if value is not None else None
+
+
+def extract_reported_net_debt(text: str) -> tuple[float, str] | None:
+    folded = fold_turkish(text)
+    triple = _find_valuation_triple_last(folded, text)
+    if triple is None:
+        return None
+    _market_cap_text, net_debt_text, _ev_text, snippet = triple
+    value = parse_turkish_number(net_debt_text)
+    return (value, snippet) if value is not None else None
+
+
+def extract_reported_pe(text: str) -> tuple[float, str] | None:
+    folded = fold_turkish(text)
+    found = _search(folded, text, _PE_RE)
+    if not found:
+        return None
+    value_text, snippet = found
+    value = parse_turkish_number(value_text)
+    return (value, snippet) if value is not None else None
+
+
+def extract_reported_ev_ebitda(text: str) -> tuple[float, str] | None:
+    folded = fold_turkish(text)
+    found = _search(folded, text, _EV_EBITDA_RE)
+    if not found:
+        return None
+    value_text, snippet = found
+    value = parse_turkish_number(value_text)
+    return (value, snippet) if value is not None else None
+
+
+def extract_reported_ps(text: str) -> tuple[float, str] | None:
+    folded = fold_turkish(text)
+    found = _search(folded, text, _PS_RE)
+    if not found:
+        return None
+    value_text, snippet = found
+    value = parse_turkish_number(value_text)
+    return (value, snippet) if value is not None else None
+
+
+def extract_reported_pb(text: str) -> tuple[float, str] | None:
+    folded = fold_turkish(text)
+    found = _search(folded, text, _PB_RE)
+    if not found:
+        return None
+    value_text, snippet = found
+    value = parse_turkish_number(value_text)
+    return (value, snippet) if value is not None else None
+
+
+# --------------------------------------------------------------------------
 # Orchestration: pages -> per-field observations (with provenance) -> merge
 # --------------------------------------------------------------------------
 
@@ -485,6 +642,14 @@ _SCALAR_EXTRACTORS: tuple[tuple[str, Callable[[str], tuple[object, str] | None]]
     ("retail_demand_multiple", extract_retail_demand_multiple),
     ("retail_allocated_shares", extract_retail_allocated_shares),
     ("institutional_allocated_shares", extract_institutional_allocated_shares),
+    ("reported_post_money_market_cap", extract_reported_post_money_market_cap),
+    ("reported_enterprise_value", extract_reported_enterprise_value),
+    ("reported_net_debt", extract_reported_net_debt),
+    ("reported_pe", extract_reported_pe),
+    ("reported_ev_ebitda", extract_reported_ev_ebitda),
+    ("reported_ps", extract_reported_ps),
+    ("reported_pb", extract_reported_pb),
+    ("headline_discount_percentage", extract_headline_discount_percentage),
 )
 
 _LIST_EXTRACTORS: tuple[tuple[str, Callable[[str], list[tuple[str, str]] | None]], ...] = (
@@ -566,6 +731,7 @@ def merge_field_observations(
     prospectus_observation: FieldObservation | None,
     announcement_observation: FieldObservation | None,
     ipo_results_observation: FieldObservation | None = None,
+    price_determination_report_observation: FieldObservation | None = None,
 ) -> ExtractedFact:
     """Combine what each source document said about one field into a
     single :class:`ExtractedFact`.
@@ -575,16 +741,23 @@ def merge_field_observations(
     - More than one has it and they **agree** -> ``extracted``, using
       whichever document rule 8 of the brief prefers for this field
       (only meaningful when both the prospectus and the announcement
-      have it — ``ipo_results_observation`` has no such priority rule,
-      since it never overlaps with the other two in practice: the
-      results-only fields are never extracted from the prospectus or
-      announcement, and vice versa), but keeping *every* observation
-      for provenance.
+      have it — ``ipo_results_observation``/``price_determination_report_observation``
+      have no such priority rule, since they never overlap with the
+      other sources in practice: each source's own fields are never
+      extracted from any other document type), but keeping *every*
+      observation for provenance.
     - More than one has it and they **disagree** -> ``conflicting``; no
       value is silently picked, every observation is kept.
     """
     observations = tuple(
-        obs for obs in (prospectus_observation, announcement_observation, ipo_results_observation) if obs is not None
+        obs
+        for obs in (
+            prospectus_observation,
+            announcement_observation,
+            ipo_results_observation,
+            price_determination_report_observation,
+        )
+        if obs is not None
     )
     if not observations:
         return _not_found()
@@ -634,6 +807,14 @@ class ExtractedFacts:
     retail_demand_multiple: ExtractedFact
     retail_allocated_shares: ExtractedFact
     institutional_allocated_shares: ExtractedFact
+    reported_post_money_market_cap: ExtractedFact
+    reported_enterprise_value: ExtractedFact
+    reported_net_debt: ExtractedFact
+    reported_pe: ExtractedFact
+    reported_ev_ebitda: ExtractedFact
+    reported_ps: ExtractedFact
+    reported_pb: ExtractedFact
+    headline_discount_percentage: ExtractedFact
 
     def as_dict(self) -> dict[str, ExtractedFact]:
         return {name: getattr(self, name) for name in FIELD_NAMES}
@@ -643,21 +824,24 @@ def build_extracted_facts(
     prospectus_observations: dict[str, FieldObservation] | None,
     announcement_observations: dict[str, FieldObservation] | None,
     ipo_results_observations: dict[str, FieldObservation] | None = None,
+    price_determination_report_observations: dict[str, FieldObservation] | None = None,
 ) -> ExtractedFacts:
     """Merge one document's worth of prospectus observations, one
-    document's worth of announcement observations, and (optional, for
-    the post-offer fields) one document's worth of IPO results
+    document's worth of announcement observations, and (optional) one
+    document's worth each of IPO results and price determination report
     observations into the final, per-field :class:`ExtractedFacts` (see
     :func:`merge_field_observations`)."""
     prospectus_observations = prospectus_observations or {}
     announcement_observations = announcement_observations or {}
     ipo_results_observations = ipo_results_observations or {}
+    price_determination_report_observations = price_determination_report_observations or {}
     merged = {
         field_name: merge_field_observations(
             field_name,
             prospectus_observations.get(field_name),
             announcement_observations.get(field_name),
             ipo_results_observations.get(field_name),
+            price_determination_report_observations.get(field_name),
         )
         for field_name in FIELD_NAMES
     }

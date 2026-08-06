@@ -12,6 +12,8 @@ from halka_arz_advisor.kap.extraction import (
     extract_key_risk_items,
     extract_observations_from_pages,
     extract_offering_price,
+    extract_reported_ev_ebitda,
+    extract_reported_ps,
     extract_retail_allocated_shares,
     extract_retail_demand_multiple,
     extract_secondary_sale_ratio,
@@ -391,4 +393,78 @@ def test_ipo_results_provenance_is_preserved():
     assert source.disclosure_id == "d-results"
     assert source.attachment_url == "https://example/results.pdf"
     assert source.page_number == 1
+    assert source.extraction_method == "digital"
+
+
+# --------------------------------------------------------------------------
+# Price determination report fields (valuation summary) — one success,
+# one missing, one conflicting, one provenance-preservation check.
+#
+# Text below is a verbatim excerpt of the "Değerleme Özeti"/"Değer
+# Çarpanları" summary tables (page 8) of a real Fiyat Tespit Raporu,
+# confirmed live against the cached PDF before writing the extractors.
+# --------------------------------------------------------------------------
+
+_PRICE_DETERMINATION_REPORT_TEXT = (
+    "Değerleme Özeti Değer (m$) Ağırlık Pay Başı Değer (TL)\n"
+    "Metodolojiler\n"
+    "İNA 338,8 50,0% 28,69\n"
+    "Yurtdışı Benzerler 316,4 25,0% 26,79\n"
+    "BİST Benzer 188,1 25,0% 15,93\n"
+    "Halka Arz Piyasa Değeri 295,5 100% 25,02\n"
+    "Halka Arz İskontosu -20%\n"
+    "Nihai Değer 236,2\n"
+    "13.05.2026 Tarihli USD/TL 46,10\n"
+    "Piyasa Değeri (mTL) 10.888 20,00\n"
+    "Değer Çarpanları 2026/03 4Ç 2026T 2027T\n"
+    "EV/EBITDA 11,5 12,1 9,1\n"
+    "F/K 29,4 m.d. m.d.\n"
+    "EV/Net Satış 8,1 8,2 6,6\n"
+    "PD/DD 0,8 m.d. m.d.\n"
+)
+
+
+def test_price_determination_report_extraction_succeeds_for_a_real_summary_line():
+    value, snippet = extract_reported_ev_ebitda(_PRICE_DETERMINATION_REPORT_TEXT)
+    assert value == 11.5
+    assert "EV/EBITDA" in snippet
+
+
+def test_price_determination_report_field_is_missing_when_not_stated():
+    # The report only ever states "EV/Net Satış" (EV/Sales) — a P/S
+    # extractor must not be confused by the similar-looking label.
+    assert extract_reported_ps(_PRICE_DETERMINATION_REPORT_TEXT) is None
+
+
+def test_price_determination_report_conflicting_observation_is_not_silently_picked():
+    # Two disagreeing price-determination-report observations of the same
+    # field (e.g. an original vs. an amended report) must not be silently
+    # resolved — both are kept for provenance.
+    src_original = SourceRef("price_determination_report", "disc-original", "url-1", 8)
+    src_amended = SourceRef("price_determination_report", "disc-amended", "url-2", 8)
+    original = FieldObservation(value=20.0, raw_snippet="İskontosu -20%", source=src_original)
+    amended = FieldObservation(value=25.03, raw_snippet="%25,03 iskontoludur", source=src_amended)
+
+    fact = merge_field_observations(
+        "headline_discount_percentage", None, None, original, amended
+    )
+
+    assert fact.status == "conflicting"
+    assert fact.value is None
+    assert set(fact.observations) == {original, amended}
+
+
+def test_price_determination_report_provenance_is_preserved():
+    page = PdfPage(number=8, text=_PRICE_DETERMINATION_REPORT_TEXT)
+    observations = extract_observations_from_pages(
+        [page],
+        document_type="price_determination_report",
+        disclosure_id="d-report",
+        attachment_url="https://example/report.pdf",
+    )
+    source = observations["reported_ev_ebitda"].source
+    assert source.document_type == "price_determination_report"
+    assert source.disclosure_id == "d-report"
+    assert source.attachment_url == "https://example/report.pdf"
+    assert source.page_number == 8
     assert source.extraction_method == "digital"

@@ -39,12 +39,11 @@ DEFAULT_CACHE_DIR = Path("data") / "cache" / "kap_pdfs"
 # Rule 6 of the brief scopes field extraction to the prospectus and
 # investor sale announcement, plus (for the post-offer participation
 # fields — see kap.extraction's IPO-results section) the IPO results
-# disclosure ("Halka Arzına İlişkin Sonuçlar"). A Fiyat Tespit Raporu,
-# for instance, is still fetched and its attachment resolved like any
-# other target type, but its text is never run through the field
-# extractors.
+# disclosure ("Halka Arzına İlişkin Sonuçlar") and (for the valuation
+# summary fields — see kap.extraction's price-determination-report
+# section) the price determination report ("Fiyat Tespit Raporu").
 _EXTRACTION_ELIGIBLE_TYPES = frozenset(
-    {"approved_prospectus", "investor_sale_announcement", "ipo_results"}
+    {"approved_prospectus", "investor_sale_announcement", "ipo_results", "price_determination_report"}
 )
 
 # pdf_status values OCR is attempted for — a digitally-readable PDF
@@ -175,6 +174,7 @@ def process_disclosure_documents(
         observations if disclosure.document_type == "approved_prospectus" else None,
         observations if disclosure.document_type == "investor_sale_announcement" else None,
         observations if disclosure.document_type == "ipo_results" else None,
+        observations if disclosure.document_type == "price_determination_report" else None,
     )
 
     warnings = () if observations else ("no target fields matched in the extracted text",)
@@ -194,6 +194,7 @@ def aggregate_company_facts(disclosures: list[KapDisclosure]) -> dict[str, Extra
     prospectus_observations: dict[str, dict[str, FieldObservation]] = {}
     announcement_observations: dict[str, dict[str, FieldObservation]] = {}
     ipo_results_observations: dict[str, dict[str, FieldObservation]] = {}
+    price_determination_report_observations: dict[str, dict[str, FieldObservation]] = {}
 
     for disclosure in disclosures:
         if disclosure.matched_spk_record_id is None or disclosure.extracted_facts is None:
@@ -205,6 +206,8 @@ def aggregate_company_facts(disclosures: list[KapDisclosure]) -> dict[str, Extra
             if disclosure.document_type == "investor_sale_announcement"
             else ipo_results_observations
             if disclosure.document_type == "ipo_results"
+            else price_determination_report_observations
+            if disclosure.document_type == "price_determination_report"
             else None
         )
         if bucket is None:
@@ -215,12 +218,18 @@ def aggregate_company_facts(disclosures: list[KapDisclosure]) -> dict[str, Extra
             if fact.status == "extracted" and field_name not in company_bucket:
                 company_bucket[field_name] = fact.observations[0]
 
-    record_ids = set(prospectus_observations) | set(announcement_observations) | set(ipo_results_observations)
+    record_ids = (
+        set(prospectus_observations)
+        | set(announcement_observations)
+        | set(ipo_results_observations)
+        | set(price_determination_report_observations)
+    )
     return {
         record_id: build_extracted_facts(
             prospectus_observations.get(record_id),
             announcement_observations.get(record_id),
             ipo_results_observations.get(record_id),
+            price_determination_report_observations.get(record_id),
         )
         for record_id in record_ids
     }

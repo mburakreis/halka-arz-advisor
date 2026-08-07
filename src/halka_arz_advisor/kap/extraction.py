@@ -340,6 +340,18 @@ _CAPITAL_INCREASE_RE = _re(rf"artirilacak\s+({_NUM})\s*tl\s+nominal\s+degerli")
 # "%170 oranında" / "% 25,03" near a capital-increase context.
 _CAPITAL_INCREASE_RATIO_RE = _re(rf"%\s*({_NUM})\s+oraninda[^\n]{{0,60}}artir")
 
+# "Ortaklığımızın çıkarılmış sermayesinin 201.000.000 TL'den 250.000.000
+# TL'ye çıkarılması" — confirmed live on 2026-08-08 against all 9 of the
+# real 2026 investor sale announcements sampled (ALBTN, EKDMR, GOLDA,
+# MASFN, METEN, ORZAX, QUICK, SARAE, SOHOE): every one states the
+# capital increase as this exact before/after absolute-TL-amount pair,
+# never as an explicit percentage — so _CAPITAL_INCREASE_RATIO_RE above
+# (which requires a stated "% ... oranında") essentially never matches
+# any of them live. Used as a fallback: the ratio is computed from the
+# two stated amounts, (new - old) / old * 100, rather than searched for
+# as an already-stated number.
+_CAPITAL_AMOUNTS_RE = _re(rf"sermayesinin\s+({_NUM})\s*tl.{{0,3}}den\s+({_NUM})\s*tl.{{0,3}}ye\s+cikarilmasi")
+
 # "ortak satışı yoluyla ... 1.300.000.000 TL" / "ortak satışına konu
 # ... TL nominal değerli" — secondary (existing-shareholder) sale amount.
 _SECONDARY_SALE_RE = _re(rf"ortak\s+satisi[^\n]{{0,60}}?({_NUM})\s*tl")
@@ -416,11 +428,21 @@ def extract_capital_increase_shares(text: str) -> tuple[float, str] | None:
 def extract_capital_increase_ratio(text: str) -> tuple[float, str] | None:
     folded = fold_turkish(text)
     found = _search(folded, text, _CAPITAL_INCREASE_RATIO_RE)
-    if not found:
+    if found:
+        value_text, snippet = found
+        value = parse_turkish_number(value_text)
+        if value is not None:
+            return value, snippet
+
+    match = _CAPITAL_AMOUNTS_RE.search(folded)
+    if not match:
         return None
-    value_text, snippet = found
-    value = parse_turkish_number(value_text)
-    return (value, snippet) if value is not None else None
+    old_value = parse_turkish_number(text[match.start(1) : match.end(1)])
+    new_value = parse_turkish_number(text[match.start(2) : match.end(2)])
+    if old_value is None or new_value is None or old_value == 0:
+        return None
+    ratio = (new_value - old_value) / old_value * 100.0
+    return ratio, text[match.start() : match.end()]
 
 
 def extract_secondary_sale_shares(text: str) -> tuple[float, str] | None:

@@ -1,5 +1,7 @@
 from datetime import date
 
+import pytest
+
 from halka_arz_advisor.kap.extraction import (
     FIELD_NAMES,
     FieldObservation,
@@ -201,6 +203,29 @@ def test_extract_capital_increase_shares_real_sentence():
 
 def test_extract_capital_increase_ratio():
     text = "Şirketimizin sermayesi %170 oranında artırılarak 3.780.000.000 TL'ye çıkarılacaktır."
+    value, _ = extract_capital_increase_ratio(text)
+    assert value == 170.0
+
+
+def test_extract_capital_increase_ratio_computed_from_before_after_capital_amounts():
+    # Real shape (folded/paraphrased from ALBTN's actual 2026 investor
+    # sale announcement): the ratio itself is never stated as a
+    # percentage — only the absolute capital before/after the increase
+    # — confirmed live across all 9 real 2026 announcements sampled.
+    text = "Ortaklığımızın çıkarılmış sermayesinin 201.000.000 TL'den 250.000.000 TL'ye çıkarılması nedeniyle artırılacak 49.000.000 TL nominal değerli pay."
+    value, snippet = extract_capital_increase_ratio(text)
+    assert value == pytest.approx((250_000_000 - 201_000_000) / 201_000_000 * 100)
+    assert "201.000.000" in snippet and "250.000.000" in snippet
+
+
+def test_extract_capital_increase_ratio_explicit_percentage_wins_over_computed_amounts():
+    # When a document states both forms, the direct percentage (rule 8's
+    # own explicit-statement precedent) is preferred over computing one
+    # from the before/after amounts — never overridden by a fallback.
+    text = (
+        "Şirketimizin sermayesi %170 oranında artırılarak 3.780.000.000 TL'ye çıkarılacaktır. "
+        "Ortaklığımızın çıkarılmış sermayesinin 1.400.000.000 TL'den 3.780.000.000 TL'ye çıkarılması nedeniyle."
+    )
     value, _ = extract_capital_increase_ratio(text)
     assert value == 170.0
 

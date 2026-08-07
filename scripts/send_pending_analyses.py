@@ -41,6 +41,8 @@ from halka_arz_advisor.decision.pipeline import compute_decision_results, resolv
 from halka_arz_advisor.gemini.cache import AnalysisCache  # noqa: E402
 from halka_arz_advisor.gemini.config import DEFAULT_MODEL  # noqa: E402
 from halka_arz_advisor.gemini.prompt import PROMPT_VERSION  # noqa: E402
+from halka_arz_advisor.kap.backfill import merge_backfilled_disclosures  # noqa: E402
+from halka_arz_advisor.kap.backfill_cache import BackfillCache  # noqa: E402
 from halka_arz_advisor.kap.classification import target_document_types  # noqa: E402
 from halka_arz_advisor.kap.client import KapClient  # noqa: E402
 from halka_arz_advisor.kap.documents import (  # noqa: E402
@@ -84,6 +86,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pdf-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_CACHE_DIR)
     parser.add_argument("--analysis-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_ANALYSIS_CACHE_DIR)
     parser.add_argument("--ocr-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_OCR_CACHE_DIR)
+    parser.add_argument("--backfill-cache-dir", type=Path, default=PROJECT_ROOT / "data" / "cache" / "kap_backfill")
     parser.add_argument("--state-file", type=Path, default=PROJECT_ROOT / DEFAULT_STATE_FILE)
     parser.add_argument("--env-file", type=Path, default=PROJECT_ROOT / ".env")
     parser.add_argument(
@@ -160,6 +163,20 @@ def main(argv: list[str] | None = None) -> int:
     processed = [
         process_disclosure_documents(d, config=config, cache=pdf_cache, cache_only=True) for d in matched
     ]
+
+    # Cheap, network-search-free — mirrors scripts/analyze_pending_ipos.py
+    # exactly, so both scripts see the identical enriched disclosure set
+    # (required for the Gemini analysis cache key to line up, same as
+    # the recent-window fetch already had to).
+    processed = merge_backfilled_disclosures(
+        processed,
+        ipo_records=ipo_records,
+        application_records=application_records,
+        backfill_cache=BackfillCache(args.backfill_cache_dir),
+        pdf_cache=pdf_cache,
+        config=config,
+        ocr_cache=ocr_cache,
+    )
 
     company_facts = aggregate_company_facts(processed)
     disclosures_by_record: dict[str, list[KapDisclosure]] = {}

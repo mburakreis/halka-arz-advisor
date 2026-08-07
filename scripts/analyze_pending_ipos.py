@@ -47,6 +47,8 @@ from halka_arz_advisor.gemini.client import GeminiClient  # noqa: E402
 from halka_arz_advisor.gemini.config import load_gemini_config_from_env  # noqa: E402
 from halka_arz_advisor.gemini.exceptions import GeminiError, GeminiUnavailableError  # noqa: E402
 from halka_arz_advisor.gemini.models import AnalysisRecord  # noqa: E402
+from halka_arz_advisor.kap.backfill import merge_backfilled_disclosures  # noqa: E402
+from halka_arz_advisor.kap.backfill_cache import BackfillCache  # noqa: E402
 from halka_arz_advisor.kap.classification import target_document_types  # noqa: E402
 from halka_arz_advisor.kap.client import KapClient  # noqa: E402
 from halka_arz_advisor.kap.documents import (  # noqa: E402
@@ -81,6 +83,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pdf-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_CACHE_DIR)
     parser.add_argument("--analysis-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_ANALYSIS_CACHE_DIR)
     parser.add_argument("--ocr-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_OCR_CACHE_DIR)
+    parser.add_argument("--backfill-cache-dir", type=Path, default=PROJECT_ROOT / "data" / "cache" / "kap_backfill")
     parser.add_argument("--env-file", type=Path, default=PROJECT_ROOT / ".env")
     return parser.parse_args(argv)
 
@@ -168,6 +171,20 @@ def main(argv: list[str] | None = None) -> int:
     processed = [
         process_disclosure_documents(d, config=config, cache=pdf_cache, cache_only=True) for d in matched
     ]
+
+    # Cheap, network-search-free: only re-attaches whatever an earlier
+    # `scripts/backfill_kap_history.py` run already found and cached for
+    # a matched company (see halka_arz_advisor.kap.backfill) — never
+    # searches KAP's history itself here.
+    processed = merge_backfilled_disclosures(
+        processed,
+        ipo_records=ipo_records,
+        application_records=application_records,
+        backfill_cache=BackfillCache(args.backfill_cache_dir),
+        pdf_cache=pdf_cache,
+        config=config,
+        ocr_cache=ocr_cache,
+    )
 
     company_facts = aggregate_company_facts(processed)
     disclosures_by_record: dict[str, list[KapDisclosure]] = {}

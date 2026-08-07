@@ -36,6 +36,8 @@ from halka_arz_advisor.decision.engine import (  # noqa: E402
     unavailable_high_weight_features,
 )
 from halka_arz_advisor.decision.pipeline import compute_decision_results, resolve_company_identity  # noqa: E402
+from halka_arz_advisor.kap.backfill import merge_backfilled_disclosures  # noqa: E402
+from halka_arz_advisor.kap.backfill_cache import BackfillCache  # noqa: E402
 from halka_arz_advisor.kap.classification import target_document_types  # noqa: E402
 from halka_arz_advisor.kap.client import KapClient  # noqa: E402
 from halka_arz_advisor.kap.documents import DEFAULT_CACHE_DIR, process_disclosure_documents  # noqa: E402
@@ -61,8 +63,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ticker", type=str, default=None, help="Only evaluate this ticker (case-insensitive)")
     parser.add_argument("--pdf-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_CACHE_DIR)
     parser.add_argument("--ocr-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_OCR_CACHE_DIR)
+    parser.add_argument("--backfill-cache-dir", type=Path, default=PROJECT_ROOT / "data" / "cache" / "kap_backfill")
     parser.add_argument("--env-file", type=Path, default=PROJECT_ROOT / ".env")
     parser.add_argument("--min-coverage", type=float, default=0.0, help="Only include companies with at least one category above this weighted coverage (default: 0.0 = include all)")
+    parser.add_argument(
+        "--no-backfill", action="store_true",
+        help="Skip merging in previously backfilled historical documents (see scripts/backfill_kap_history.py) — recent-window data only",
+    )
     return parser.parse_args(argv)
 
 
@@ -117,6 +124,21 @@ def main(argv: list[str] | None = None) -> int:
         process_disclosure_documents(d, config=config, cache=pdf_cache, cache_only=True, ocr_scanned=True, ocr_cache=ocr_cache)
         for d in matched
     ]
+
+    if not args.no_backfill:
+        # Cheap, network-search-free: only re-attaches whatever an
+        # earlier `scripts/backfill_kap_history.py` run already found
+        # and cached — never searches KAP's history itself here.
+        processed = merge_backfilled_disclosures(
+            processed,
+            ipo_records=ipo_records,
+            application_records=application_records,
+            backfill_cache=BackfillCache(args.backfill_cache_dir),
+            pdf_cache=pdf_cache,
+            config=config,
+            ocr_scanned=True,
+            ocr_cache=ocr_cache,
+        )
 
     disclosures_by_record: dict[str, list[KapDisclosure]] = {}
     for d in processed:

@@ -27,13 +27,23 @@ called per company, bounded to its own IPO lifecycle window, cached
 cleanly — preserving whatever it already recovered — on a persistent
 KAP failure (e.g. HTTP 429) rather than retrying indefinitely.
 
+Cutoff resolution follows three precedence tiers (see
+:mod:`halka_arz_advisor.historical_dataset.cutoff`): (1) a pre-cutoff
+``subscription_end_date`` extracted from the prospectus/announcement,
+(2) failing that, an explicit restatement of the subscription date
+range in an official KAP IPO-results ("Halka Arzı Sonuçları") notice,
+or (3) the same, in an already-cached issuer-IR copy of the pre-offer
+announcement (cache-only — this command never crawls an issuer's site
+itself; see ``scripts/ingest_issuer_ir_documents.py`` for that). Tiers
+2/3 are read directly from raw document text, never through the normal
+``ExtractedFacts`` pipeline, so nothing else about those documents ever
+becomes a decision-input feature.
+
 Writes the whole dataset to ``data/cache/historical_dataset/<version>/dataset.jsonl``
 and prints a summary to stdout. ``--inspect`` skips fetching/building
-entirely and just re-summarizes whatever's already on disk. Issuer-IR
-supplementary disclosures are never used here (see
-:func:`halka_arz_advisor.historical_dataset.snapshot_builder.build_historical_snapshot`'s
-docstring for why). Never touches decision weights/thresholds, Gemini,
-Telegram, or exit logic — read-only reconstruction only.
+entirely and just re-summarizes whatever's already on disk. Never
+touches decision weights/thresholds, Gemini, Telegram, or exit logic —
+read-only reconstruction only.
 """
 
 from __future__ import annotations
@@ -49,8 +59,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from halka_arz_advisor.evds.cache import EvdsCache  # noqa: E402
-from halka_arz_advisor.historical_dataset import build_historical_snapshot, read_dataset, write_dataset  # noqa: E402
+from halka_arz_advisor.historical_dataset import (  # noqa: E402
+    build_historical_snapshot,
+    collect_post_offer_cutoff_evidence,
+    read_dataset,
+    write_dataset,
+)
 from halka_arz_advisor.ipo_outcomes import IpoMarketOutcomeStore, build_ipo_market_outcome  # noqa: E402
+from halka_arz_advisor.issuer_ir import IssuerIrCache, collect_supplementary_disclosures  # noqa: E402
 from halka_arz_advisor.kap.backfill import merge_backfilled_disclosures, search_and_backfill  # noqa: E402
 from halka_arz_advisor.kap.backfill_cache import BackfillCache  # noqa: E402
 from halka_arz_advisor.kap.classification import target_document_types  # noqa: E402
@@ -92,6 +108,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pdf-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_CACHE_DIR)
     parser.add_argument("--ocr-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_OCR_CACHE_DIR)
     parser.add_argument("--backfill-cache-dir", type=Path, default=PROJECT_ROOT / "data" / "cache" / "kap_backfill")
+    parser.add_argument("--issuer-ir-cache-dir", type=Path, default=PROJECT_ROOT / "data" / "cache" / "kap_issuer_ir")
     parser.add_argument("--evds-cache-dir", type=Path, default=PROJECT_ROOT / "data" / "cache" / "evds")
     parser.add_argument("--bulletin-cache-dir", type=Path, default=PROJECT_ROOT / "data" / "cache" / "bist_bulletin")
     parser.add_argument("--outcome-store-dir", type=Path, default=PROJECT_ROOT / "data" / "cache" / "ipo_outcomes")
@@ -113,9 +130,10 @@ def _find_application_record(
 def _summarize(dataset: list[dict]) -> dict:
     total = len(dataset)
     cutoff_status = Counter(row["cutoff"]["status"] for row in dataset)
-    # Only "kap_extraction.subscription_end_date" is reachable today —
-    # see halka_arz_advisor.historical_dataset.cutoff's module docstring
-    # for why the SPK-record tier never contributes one.
+    # One of the three tiers documented in
+    # halka_arz_advisor.historical_dataset.cutoff's module docstring —
+    # the SPK-record tier was investigated and confirmed to never
+    # contribute one (no such field exists in SPK's schema).
     cutoff_source = Counter(row["cutoff"]["source"] for row in dataset if row["cutoff"]["source"] is not None)
 
     usable_signals = {"participate", "limited_participation", "skip"}
@@ -301,6 +319,26 @@ def main(argv: list[str] | None = None) -> int:
     bulletin_cache = BulletinCache(args.bulletin_cache_dir)
     outcome_store = IpoMarketOutcomeStore(args.outcome_store_dir)
 
+    # Cheap, crawl-free (see halka_arz_advisor.issuer_ir.ingest's own
+    # convention): only re-attaches whatever an earlier
+    # scripts/ingest_issuer_ir_documents.py run already found and
+    # cached, for tier 3 of cutoff resolution
+    # (halka_arz_advisor.historical_dataset.cutoff) — never used as
+    # feature evidence (see build_historical_snapshot's own docstring).
+    issuer_ir_disclosures = collect_supplementary_disclosures(
+        ipo_records=ipo_records,
+        application_records=application_records,
+        cache=IssuerIrCache(args.issuer_ir_cache_dir),
+        pdf_cache=pdf_cache,
+        config=config,
+        ocr_scanned=True,
+        ocr_cache=ocr_cache,
+    )
+    issuer_ir_by_record: dict[str, list[KapDisclosure]] = {}
+    for d in issuer_ir_disclosures:
+        if d.matched_spk_record_id:
+            issuer_ir_by_record.setdefault(d.matched_spk_record_id, []).append(d)
+
     generated_at = datetime.now(UTC)
     reference_date = generated_at.date()
     snapshots = []
@@ -318,6 +356,19 @@ def main(argv: list[str] | None = None) -> int:
 
         disclosures_for_company = disclosures_by_record[record_id]
         application_record = _find_application_record(disclosures_for_company, tuple(application_records))
+
+        # Tier 2/3 cutoff evidence — read directly from official
+        # post-offer documents (never through the normal ExtractedFacts
+        # pipeline, so nothing here can become a scored feature; see
+        # halka_arz_advisor.historical_dataset.post_offer_evidence).
+        ipo_results_for_company = [d for d in disclosures_for_company if d.document_type == "ipo_results"]
+        post_offer_evidence = collect_post_offer_cutoff_evidence(
+            ipo_results_for_company,
+            issuer_ir_by_record.get(record_id, []),
+            config=config,
+            pdf_cache=pdf_cache,
+            ocr_cache=ocr_cache,
+        )
 
         outcome = None
         if not args.no_outcomes and ticker:
@@ -340,12 +391,16 @@ def main(argv: list[str] | None = None) -> int:
             application_record=application_record,
             disclosures=disclosures_for_company,
             evds_cache=evds_cache,
+            post_offer_cutoff_evidence=post_offer_evidence,
             outcome=outcome,
             generated_at=generated_at,
         )
         snapshots.append(snapshot)
         signal = snapshot.decision_result.signal if snapshot.decision_result else f"cutoff_{snapshot.cutoff.status}"
-        print(f"  {ticker or record_id}: cutoff={snapshot.cutoff.cutoff_date}, signal={signal}", file=sys.stderr)
+        print(
+            f"  {ticker or record_id}: cutoff={snapshot.cutoff.cutoff_date} (source={snapshot.cutoff.source}), signal={signal}",
+            file=sys.stderr,
+        )
 
     written_path = write_dataset(snapshots, args.dataset_dir)
     print(f"Wrote {len(snapshots)} snapshot(s) to {written_path}", file=sys.stderr)

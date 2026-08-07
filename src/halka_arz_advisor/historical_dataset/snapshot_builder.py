@@ -29,7 +29,7 @@ from ..kap.documents import aggregate_company_facts, aggregate_company_financial
 from ..kap.models import KapDisclosure
 from ..spk.application_list import SpkIpoApplicationRecord
 from ..spk.models import SpkIpoRecord
-from .cutoff import resolve_decision_cutoff
+from .cutoff import PostOfferCutoffEvidence, resolve_decision_cutoff
 from .filtering import application_record_before_cutoff, disclosures_before_cutoff, end_of_day_istanbul, market_context_as_of
 from .models import HISTORICAL_DATASET_VERSION, HistoricalIpoSnapshot
 
@@ -42,6 +42,7 @@ def build_historical_snapshot(
     application_record: SpkIpoApplicationRecord | None,
     disclosures: Sequence[KapDisclosure],
     evds_cache: EvdsCache,
+    post_offer_cutoff_evidence: Sequence[PostOfferCutoffEvidence] = (),
     outcome: IpoMarketOutcome | None = None,
     generated_at: datetime | None = None,
 ) -> HistoricalIpoSnapshot:
@@ -50,10 +51,24 @@ def build_historical_snapshot(
     :func:`halka_arz_advisor.kap.backfill.merge_backfilled_disclosures`)
     matched to ``record_id``, **unfiltered** — this function determines
     the cutoff and does the filtering itself. Deliberately does not
-    accept issuer-IR-sourced supplementary disclosures at all: those are
+    accept issuer-IR-sourced supplementary disclosures here at all
+    (only via ``post_offer_cutoff_evidence``, see below): those are
     stamped with the crawl time, not a real publish date (see
     :mod:`halka_arz_advisor.issuer_ir.ingest`), so this project has no
-    way to prove one was available before any given historical cutoff.
+    way to prove one was available before any given historical cutoff
+    *as a feature source*.
+
+    ``post_offer_cutoff_evidence`` — already-extracted, already-resolved
+    (see :mod:`halka_arz_advisor.historical_dataset.post_offer_evidence`)
+    — supplies :func:`~halka_arz_advisor.historical_dataset.cutoff.resolve_decision_cutoff`'s
+    tiers 2/3: an explicit subscription-date restatement in an official
+    post-offer document (a KAP IPO-results notice, or an issuer-IR copy
+    of the pre-offer announcement). Structurally separate from
+    ``disclosures``/``facts`` by construction — this argument only ever
+    reaches ``resolve_decision_cutoff``, never
+    :class:`~halka_arz_advisor.decision.audit.CompanyDecisionInputs`, so
+    it can only move *where* the cutoff falls, never what a snapshot's
+    features/decision are computed from.
 
     ``spk_record`` is used only for identity (``company_name``, via
     ``sirket_unvani``) and to hand through to a later
@@ -71,7 +86,7 @@ def build_historical_snapshot(
     all_disclosures = tuple(disclosures)
 
     unfiltered_facts = aggregate_company_facts(list(all_disclosures)).get(record_id)
-    cutoff = resolve_decision_cutoff(unfiltered_facts)
+    cutoff = resolve_decision_cutoff(unfiltered_facts, post_offer_evidence=post_offer_cutoff_evidence)
 
     if cutoff.status != "resolved" or cutoff.cutoff_date is None:
         return HistoricalIpoSnapshot(

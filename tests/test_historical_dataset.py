@@ -3,7 +3,12 @@ from pathlib import Path
 
 from halka_arz_advisor.evds.cache import EvdsCache
 from halka_arz_advisor.evds.models import EvdsObservation
-from halka_arz_advisor.historical_dataset import build_historical_snapshot, market_context_as_of, resolve_decision_cutoff
+from halka_arz_advisor.historical_dataset import (
+    PostOfferCutoffEvidence,
+    build_historical_snapshot,
+    market_context_as_of,
+    resolve_decision_cutoff,
+)
 from halka_arz_advisor.ipo_outcomes.models import IpoMarketOutcome
 from halka_arz_advisor.kap.extraction import FieldObservation, SourceRef, build_extracted_facts
 from halka_arz_advisor.kap.models import KapDisclosure
@@ -43,6 +48,23 @@ def _price_determination_report(*, disclosure_id: str, published_at: datetime, r
     )
 
 
+def _ipo_results(*, disclosure_id: str, published_at: datetime, total_demand_multiple: float) -> KapDisclosure:
+    """A post-offer 'Halka Arzı Sonuçları' disclosure — always published
+    after the subscription window closes, carrying its own (feature-
+    eligible-looking) extracted_facts, exactly like a real one would."""
+    src = SourceRef("ipo_results", disclosure_id, "url-results", 1)
+    facts = build_extracted_facts(
+        None, None, {"total_demand_multiple": FieldObservation(total_demand_multiple, f"{total_demand_multiple} katina", src)}
+    )
+    return KapDisclosure(
+        disclosure_id=disclosure_id, disclosure_index=3, published_at=published_at,
+        company_name="TEST A.Ş.", ticker="TEST", title="Halka Arzı Sonuçları", summary="",
+        document_type="ipo_results", notification_url="https://www.kap.org.tr/tr/Bildirim/3",
+        attachment_urls=(), matched_spk_record_id=RECORD_ID, match_method="ticker", raw={},
+        pdf_status="ok", extracted_facts=facts,
+    )
+
+
 def _outcome(*, first_day_return: float) -> IpoMarketOutcome:
     return IpoMarketOutcome(
         ticker="TEST", company_name="TEST A.Ş.", offer_price=10.0,
@@ -56,10 +78,16 @@ def _outcome(*, first_day_return: float) -> IpoMarketOutcome:
     )
 
 
-def _build(tmp_path: Path, disclosures: tuple[KapDisclosure, ...], outcome: IpoMarketOutcome | None = None):
+def _build(
+    tmp_path: Path,
+    disclosures: tuple[KapDisclosure, ...],
+    outcome: IpoMarketOutcome | None = None,
+    post_offer_cutoff_evidence: tuple[PostOfferCutoffEvidence, ...] = (),
+):
     return build_historical_snapshot(
         RECORD_ID, ticker="TEST", spk_record=None, application_record=None,
         disclosures=disclosures, evds_cache=EvdsCache(tmp_path / "evds"), outcome=outcome,
+        post_offer_cutoff_evidence=post_offer_cutoff_evidence,
         generated_at=datetime(2026, 8, 1, tzinfo=UTC),
     )
 
@@ -151,17 +179,15 @@ def test_outcome_label_never_changes_the_reconstructed_decision(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# 4. Cutoff-source precedence
+# 4. Cutoff-source precedence (tier 1: kap_extraction.subscription_end_date)
 # --------------------------------------------------------------------------
 #
-# Only one source is reachable today: kap_extraction.subscription_end_date.
-# A second, ex-post tier (SPK's completed-IPO record) was investigated and
-# confirmed to have no subscription/talep-toplama date field at all —
-# verified directly against the live SPK OpenAPI schema
-# (components.schemas.IlkHalkaArzVerileriBilgi has no such property, only
-# borsadaIslemGormeTarihi — a different, later, post-offer event) — so
-# there is no second code path to exercise; see cutoff.py's module
-# docstring for the full investigation.
+# SpkIpoRecord was investigated and confirmed to have no subscription/
+# talep-toplama date field at all — verified directly against the live
+# SPK OpenAPI schema (components.schemas.IlkHalkaArzVerileriBilgi has no
+# such property, only borsadaIslemGormeTarihi — a different, later,
+# post-offer event) — so it was never wired in as a tier. Tiers 2/3
+# (post-offer document evidence) are covered in section 5 below.
 
 
 def test_cutoff_source_is_recorded_on_resolution_and_absent_when_unresolved():
@@ -184,3 +210,61 @@ def test_cutoff_source_is_recorded_on_resolution_and_absent_when_unresolved():
     missing = resolve_decision_cutoff(build_extracted_facts(None, None))
     assert missing.status == "missing"
     assert missing.source is None
+
+
+# --------------------------------------------------------------------------
+# 5. Tier-2 post-offer evidence: resolves the cutoff, but nothing else
+#    about that same document ever becomes a decision input
+# --------------------------------------------------------------------------
+
+
+def test_post_offer_ipo_results_resolves_cutoff_and_its_other_facts_still_cannot_enter_the_snapshot(tmp_path):
+    # No pre-cutoff document here states subscription_end_date at all
+    # (the price determination report only has reported_pe) — tier 1 is
+    # genuinely "missing", so tier 2 (post-offer evidence) is consulted.
+    pre_cutoff_report = _price_determination_report(
+        disclosure_id="d-pdr", published_at=datetime(2026, 7, 5), reported_pe=12.0
+    )
+    post_offer_results = _ipo_results(disclosure_id="d-results", published_at=datetime(2026, 7, 15), total_demand_multiple=4.98)
+    evidence = (
+        PostOfferCutoffEvidence(
+            cutoff_date=CUTOFF, source="kap_ipo_results.subscription_end_date",
+            disclosure_id="d-results", snippet="... tarihleri arasında talep toplanmıştır.",
+        ),
+    )
+
+    snapshot = _build(tmp_path, (pre_cutoff_report, post_offer_results), post_offer_cutoff_evidence=evidence)
+
+    assert snapshot.cutoff.status == "resolved"
+    assert snapshot.cutoff.cutoff_date == CUTOFF
+    assert snapshot.cutoff.source == "kap_ipo_results.subscription_end_date"
+    assert snapshot.cutoff.evidence_disclosure_id == "d-results"
+
+    # The IPO-results disclosure itself is excluded from features (it's
+    # published after the very cutoff it helped establish) — its own
+    # total_demand_multiple never reaches the audit or the decision.
+    assert "d-results" not in snapshot.considered_disclosure_ids
+    assert "d-results" in snapshot.excluded_post_cutoff_disclosure_ids
+    assert all(e.disclosure_id != "d-results" for r in snapshot.audit_results for e in r.evidence)
+
+    demand_result = next(r for r in snapshot.audit_results if r.feature_id == "oversubscription_ratio_overall")
+    assert demand_result.status in ("MISSING_DOCUMENT", "MISSING_FIELD")
+
+
+def test_pre_cutoff_evidence_wins_over_post_offer_evidence_when_both_exist():
+    pre_cutoff_facts = build_extracted_facts(
+        None, {"subscription_end_date": FieldObservation(CUTOFF, "...", SRC_ANNOUNCEMENT)}
+    )
+    conflicting_post_offer_evidence = (
+        PostOfferCutoffEvidence(
+            cutoff_date=date(2026, 7, 20), source="kap_ipo_results.subscription_end_date",
+            disclosure_id="d-results", snippet="a different date entirely",
+        ),
+    )
+
+    resolution = resolve_decision_cutoff(pre_cutoff_facts, post_offer_evidence=conflicting_post_offer_evidence)
+
+    assert resolution.status == "resolved"
+    assert resolution.cutoff_date == CUTOFF
+    assert resolution.source == "kap_extraction.subscription_end_date"
+    assert resolution.evidence_disclosure_id == "d-announcement"

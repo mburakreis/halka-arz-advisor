@@ -234,6 +234,89 @@ _SUBSCRIPTION_DATE_RANGE_TRAILING_RE = _re(
     rf"({_DATE})\s*(?:-|ile)\s*({_DATE})\s*tarihleri\s+arasinda[\s\S]{{0,80}}?satisa\s+sunulacaktir"
 )
 
+# --------------------------------------------------------------------------
+# Subscription end date as *restated* in an official post-offer document
+# (KAP "Halka Arzı Sonuçları" / IPO-results disclosure, or an issuer-IR
+# copy of one) — cutoff-boundary evidence only, never a scored decision
+# feature. See :func:`extract_subscription_end_date_from_result_text`'s
+# own docstring for why this is deliberately kept out of FIELD_NAMES/
+# ExtractedFacts entirely, unlike every extractor above.
+#
+# Confirmed live on 2026-08-08 against four real 2026 IPO-results
+# disclosures (ALBTN, METEN, ORZAX, SOHOE) — each states the closing day
+# of the subscription period as the last entry of a Turkish
+# calendar-date list, immediately followed by "tarihleri arasında"/
+# "tarihlerinde" and (nearby) "talep top-", e.g.:
+#   ORZAX: "...halka arzında 29 - 30 Haziran, 1 Temmuz 2026 tarihleri
+#           arasında talep toplanmıştır."      -> 2026-07-01
+#   ALBTN: "...liderliğinde 22-23 Temmuz 2026 tarihlerinde Sabit
+#           Fiyatla Talep Toplama ve Satış Yöntemi ile gerçekleşmiştir."
+#                                                -> 2026-07-23
+#   METEN: "...halka arzında 20-21-22 Temmuz 2026 tarihleri arasında
+#           talep toplanmıştır."                -> 2026-07-22
+#   SOHOE: "...ile 30 Haziran – 1 Temmuz 2026 tarihlerinde ... talep
+#           toplanmıştır."                      -> 2026-07-01
+#
+# Each of these lists several days (sometimes spanning two different
+# Turkish month names) before the final "<day> <ay adı> <yıl>" — this
+# pattern deliberately captures only that *last* day/month/year triple
+# (the one immediately adjacent to "tarihleri arasında"/"tarihlerinde"),
+# which is always the period's closing date regardless of how many
+# earlier days/months are listed before it; it never attempts to parse
+# the full list or recover a start date.
+_TURKISH_MONTHS: dict[str, int] = {
+    "ocak": 1, "subat": 2, "mart": 3, "nisan": 4, "mayis": 5, "haziran": 6,
+    "temmuz": 7, "agustos": 8, "eylul": 9, "ekim": 10, "kasim": 11, "aralik": 12,
+}
+_TURKISH_MONTH_NAME_ALTERNATION = "|".join(_TURKISH_MONTHS)
+_SUBSCRIPTION_RESULT_END_DATE_RE = _re(
+    rf"(\d{{1,2}})\s+({_TURKISH_MONTH_NAME_ALTERNATION})\s+(\d{{4}})\s+tarihleri?\s*(?:arasinda|inde)"
+    rf"[\s\S]{{0,120}}?talep\s+topla"
+)
+
+
+def parse_turkish_month_date(day_text: str, month_name: str, year_text: str) -> date | None:
+    month = _TURKISH_MONTHS.get(fold_turkish(month_name).strip())
+    if month is None:
+        return None
+    try:
+        return date(int(year_text), month, int(day_text))
+    except ValueError:
+        return None
+
+
+def extract_subscription_end_date_from_result_text(text: str) -> tuple[date, str] | None:
+    """The subscription period's closing date, as explicitly *restated*
+    in an official post-offer document (a KAP "Halka Arzı Sonuçları"
+    IPO-results disclosure, or — per the same rule — an issuer-IR copy
+    of one).
+
+    Deliberately **not** part of :data:`FIELD_NAMES`/:class:`ExtractedFacts`/
+    :func:`merge_field_observations`/:func:`extract_observations_from_pages`:
+    unlike every other field in this module, nothing this function finds
+    is ever meant to become a ``kap_extraction.*`` fact — that would risk
+    it being read as evidence for the scored, mandatory, pre-offer
+    ``subscription_window`` catalog feature (live or historical), which
+    is exactly the leak this function exists to avoid. Callers (see
+    :mod:`halka_arz_advisor.historical_dataset.post_offer_evidence`) use
+    this only to establish where a historical decision cutoff falls —
+    evaluation-boundary metadata, not a predictive feature — and must
+    keep the result structurally separate from any
+    :class:`ExtractedFacts` built for that same company.
+    """
+    folded = fold_turkish(text)
+    match = _SUBSCRIPTION_RESULT_END_DATE_RE.search(folded)
+    if not match:
+        return None
+    day_text = text[match.start(1) : match.end(1)]
+    month_text = text[match.start(2) : match.end(2)]
+    year_text = text[match.start(3) : match.end(3)]
+    value = parse_turkish_month_date(day_text, month_text, year_text)
+    if value is None:
+        return None
+    return value, text[match.start() : match.end()]
+
+
 # "Halka arz satış fiyatı olarak belirlenen 76,60 TL" — observed live in a
 # real Fiyat Tespit Raporu.
 _PRICE_NARRATIVE_RE = _re(rf"belirlenen\s+({_NUM})\s*tl")

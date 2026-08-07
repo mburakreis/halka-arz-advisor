@@ -61,6 +61,7 @@ def _cutoff_to_dict(cutoff: CutoffResolution) -> dict:
         "cutoff_date": cutoff.cutoff_date.isoformat() if cutoff.cutoff_date else None,
         "candidate_dates": [d.isoformat() for d in cutoff.candidate_dates],
         "source": cutoff.source,
+        "evidence_disclosure_id": cutoff.evidence_disclosure_id,
     }
 
 

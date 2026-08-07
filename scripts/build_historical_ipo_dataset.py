@@ -91,6 +91,10 @@ def _find_application_record(
 def _summarize(dataset: list[dict]) -> dict:
     total = len(dataset)
     cutoff_status = Counter(row["cutoff"]["status"] for row in dataset)
+    # Only "kap_extraction.subscription_end_date" is reachable today —
+    # see halka_arz_advisor.historical_dataset.cutoff's module docstring
+    # for why the SPK-record tier never contributes one.
+    cutoff_source = Counter(row["cutoff"]["source"] for row in dataset if row["cutoff"]["source"] is not None)
 
     usable_signals = {"participate", "limited_participation", "skip"}
     signal_counts = Counter(
@@ -122,6 +126,7 @@ def _summarize(dataset: list[dict]) -> dict:
     return {
         "total_snapshots": total,
         "cutoff_status_counts": dict(cutoff_status),
+        "cutoff_source_counts": dict(cutoff_source),
         "signal_counts": dict(signal_counts),
         "decisions_usable": usable,
         "decisions_insufficient_data": insufficient,

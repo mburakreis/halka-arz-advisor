@@ -190,9 +190,29 @@ def _re(pattern: str) -> re.Pattern[str]:
     return re.compile(pattern, re.IGNORECASE)
 
 
-# "22.07.2026 - 24.07.2026", "22.07.2026 ile 24.07.2026 tarihleri arasında",
-# anchored near "talep toplama" (subscription collection).
-_SUBSCRIPTION_DATE_RANGE_RE = _re(rf"talep\s+toplama[^\n]{{0,120}}?({_DATE})\s*(?:-|ile)\s*({_DATE})")
+# "22.07.2026 - 24.07.2026", "22.07.2026 ile 24.07.2026 tarihleri arasında".
+#
+# Anchor phrase confirmed live on 2026-08-08 against real 2026 investor
+# sale announcements (QUICK, MASFN — OCR'd text, since both are scanned
+# PDFs): the real heading used is "Halka Arz Süresi" ("Offering
+# Duration"), e.g. QUICK's actual sentence — "Halka Arz Süresi: Halka
+# arz edilecek olan ... paylar 19.01.2026 ile31.07.2026 tarihleri
+# arasında 3 iş günü süreyle satışa sunulacaktır." — never "talep
+# toplama" in either sample. "talep toplama" (this project's original,
+# untested assumption) is kept as a second recognized anchor in case
+# some other document phrases it that way, but is no longer the primary
+# real-world match.
+#
+# The gap between the anchor and the date range spans a real line wrap
+# in both live samples above ("...adet\nnama yazılı paylar
+# 19.01.2026...") — unlike every other narrative-sentence pattern in
+# this module (each confirmed only on a single visual line so far), so
+# this is the one pattern here where the gap must cross newlines:
+# ``[\s\S]`` (not ``[^\n]``) matches any character including ``\n``,
+# scoped to just this pattern rather than changing this module's
+# shared ``_re()`` flags.
+_SUBSCRIPTION_DATE_ANCHOR = r"(?:halka\s+arz\s+suresi|talep\s+toplama)"
+_SUBSCRIPTION_DATE_RANGE_RE = _re(rf"{_SUBSCRIPTION_DATE_ANCHOR}[\s\S]{{0,160}}?({_DATE})\s*(?:-|ile)\s*({_DATE})")
 
 # "Halka arz satış fiyatı olarak belirlenen 76,60 TL" — observed live in a
 # real Fiyat Tespit Raporu.

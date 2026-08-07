@@ -3,7 +3,7 @@ from pathlib import Path
 
 from halka_arz_advisor.evds.cache import EvdsCache
 from halka_arz_advisor.evds.models import EvdsObservation
-from halka_arz_advisor.historical_dataset import build_historical_snapshot, market_context_as_of
+from halka_arz_advisor.historical_dataset import build_historical_snapshot, market_context_as_of, resolve_decision_cutoff
 from halka_arz_advisor.ipo_outcomes.models import IpoMarketOutcome
 from halka_arz_advisor.kap.extraction import FieldObservation, SourceRef, build_extracted_facts
 from halka_arz_advisor.kap.models import KapDisclosure
@@ -148,3 +148,39 @@ def test_outcome_label_never_changes_the_reconstructed_decision(tmp_path):
     assert no_outcome.outcome is None
     assert wildly_positive.outcome.first_day_return == 500.0
     assert wildly_negative.outcome.first_day_return == -90.0
+
+
+# --------------------------------------------------------------------------
+# 4. Cutoff-source precedence
+# --------------------------------------------------------------------------
+#
+# Only one source is reachable today: kap_extraction.subscription_end_date.
+# A second, ex-post tier (SPK's completed-IPO record) was investigated and
+# confirmed to have no subscription/talep-toplama date field at all —
+# verified directly against the live SPK OpenAPI schema
+# (components.schemas.IlkHalkaArzVerileriBilgi has no such property, only
+# borsadaIslemGormeTarihi — a different, later, post-offer event) — so
+# there is no second code path to exercise; see cutoff.py's module
+# docstring for the full investigation.
+
+
+def test_cutoff_source_is_recorded_on_resolution_and_absent_when_unresolved():
+    resolved_facts = build_extracted_facts(
+        None,
+        {"subscription_end_date": FieldObservation(date(2026, 7, 10), "...", SRC_ANNOUNCEMENT)},
+    )
+    resolved = resolve_decision_cutoff(resolved_facts)
+    assert resolved.status == "resolved"
+    assert resolved.source == "kap_extraction.subscription_end_date"
+
+    conflicting_facts = build_extracted_facts(
+        {"subscription_end_date": FieldObservation(date(2026, 7, 10), "...", SourceRef("approved_prospectus", "d-p", "url-p", 1))},
+        {"subscription_end_date": FieldObservation(date(2026, 7, 11), "...", SRC_ANNOUNCEMENT)},
+    )
+    conflicting = resolve_decision_cutoff(conflicting_facts)
+    assert conflicting.status == "conflicting"
+    assert conflicting.source is None
+
+    missing = resolve_decision_cutoff(build_extracted_facts(None, None))
+    assert missing.status == "missing"
+    assert missing.source is None

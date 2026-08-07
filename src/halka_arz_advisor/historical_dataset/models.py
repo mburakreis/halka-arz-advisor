@@ -60,7 +60,7 @@ def _cutoff_to_dict(cutoff: CutoffResolution) -> dict:
         "status": cutoff.status,
         "cutoff_date": cutoff.cutoff_date.isoformat() if cutoff.cutoff_date else None,
         "candidate_dates": [d.isoformat() for d in cutoff.candidate_dates],
-        "source_field": "kap_extraction.subscription_end_date",
+        "source": cutoff.source,
     }
 
 

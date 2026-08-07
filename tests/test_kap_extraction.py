@@ -80,6 +80,31 @@ def test_extract_subscription_dates_not_found_returns_none_pair():
     assert extract_subscription_dates("bu metinde talep toplama tarihi yok") == (None, None)
 
 
+def test_extract_subscription_dates_halka_arz_suresi_anchor_across_line_wraps():
+    # Real shape (folded/paraphrased from QUICK's and MASFN's actual
+    # 2026 investor sale announcements, OCR'd): the "Halka Arz Süresi"
+    # heading, not "talep toplama", and the date range wrapped onto a
+    # later line — the anchor and dates are never on the same line.
+    text = (
+        "Halka Arz Süresi: Halka arz edilecek olan 48.312.950 TL nominal değerli 48.312.950 adet\n"
+        "nama yazılı paylar 29.07.2026 ile31.07.2026 tarihleri arasında 3 iş günü süreyle satışa\n"
+        "sunulacaktır."
+    )
+    start, end = extract_subscription_dates(text)
+    assert start[0] == date(2026, 7, 29)
+    assert end[0] == date(2026, 7, 31)
+    assert "Halka Arz Süresi" in start[1]
+
+
+def test_extract_subscription_dates_halka_arz_suresi_no_space_before_ile():
+    # "ile" glued directly onto the following date with no space is a
+    # real OCR artifact observed live — must still parse.
+    text = "Halka Arz Süresi: paylar 01.08.2026 ile03.08.2026 tarihleri arasında satışa sunulacaktır."
+    start, end = extract_subscription_dates(text)
+    assert start[0] == date(2026, 8, 1)
+    assert end[0] == date(2026, 8, 3)
+
+
 # --------------------------------------------------------------------------
 # Offering price / currency
 # --------------------------------------------------------------------------

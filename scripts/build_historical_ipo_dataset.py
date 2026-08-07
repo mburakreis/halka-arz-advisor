@@ -4,6 +4,7 @@
 Usage:
     uv run python scripts/build_historical_ipo_dataset.py
     uv run python scripts/build_historical_ipo_dataset.py --ticker QUICK --ticker SARAE
+    uv run python scripts/build_historical_ipo_dataset.py --hydrate
     uv run python scripts/build_historical_ipo_dataset.py --no-outcomes
     uv run python scripts/build_historical_ipo_dataset.py --inspect
 
@@ -15,6 +16,16 @@ reconstructs a point-in-time :class:`~halka_arz_advisor.historical_dataset.model
 (see :mod:`halka_arz_advisor.historical_dataset` for the leakage rules
 this reconstruction follows) and attaches its later market outcome (see
 :mod:`halka_arz_advisor.ipo_outcomes`) as a separate label.
+
+By default, a company still missing a readable prospectus/announcement/
+price-determination-report is left as-is (only the already-cached
+``kap_backfill`` state is reused, via ``merge_backfilled_disclosures`` —
+no network search). Pass ``--hydrate`` to actively close that gap for
+this run: :func:`halka_arz_advisor.kap.backfill.search_and_backfill` is
+called per company, bounded to its own IPO lifecycle window, cached
+(never repeats an already-exhausted window on a later run), and stops
+cleanly — preserving whatever it already recovered — on a persistent
+KAP failure (e.g. HTTP 429) rather than retrying indefinitely.
 
 Writes the whole dataset to ``data/cache/historical_dataset/<version>/dataset.jsonl``
 and prints a summary to stdout. ``--inspect`` skips fetching/building
@@ -40,7 +51,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from halka_arz_advisor.evds.cache import EvdsCache  # noqa: E402
 from halka_arz_advisor.historical_dataset import build_historical_snapshot, read_dataset, write_dataset  # noqa: E402
 from halka_arz_advisor.ipo_outcomes import IpoMarketOutcomeStore, build_ipo_market_outcome  # noqa: E402
-from halka_arz_advisor.kap.backfill import merge_backfilled_disclosures  # noqa: E402
+from halka_arz_advisor.kap.backfill import merge_backfilled_disclosures, search_and_backfill  # noqa: E402
 from halka_arz_advisor.kap.backfill_cache import BackfillCache  # noqa: E402
 from halka_arz_advisor.kap.classification import target_document_types  # noqa: E402
 from halka_arz_advisor.kap.client import KapClient  # noqa: E402
@@ -66,6 +77,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--year", type=int, action="append", dest="years", help="SPK completed-IPO year to search (repeatable; default: current year)")
     parser.add_argument("--days", type=int, default=90, help="How many days back to look for KAP disclosures (default: 90, matching KAP's own observed request-range limit)")
     parser.add_argument("--no-outcomes", action="store_true", help="Skip attaching the market-outcome label (no market_prices network access at all)")
+    parser.add_argument(
+        "--hydrate", action="store_true",
+        help=(
+            "Before building, actively fetch still-missing official pre-offer documents "
+            "(prospectus/investor sale announcement/price determination report) via "
+            "kap.backfill.search_and_backfill for each company this run considers — bounded to that "
+            "company's own IPO lifecycle window, and a no-op for a company already exhaustively "
+            "searched by an earlier run. Off by default (uses only the cheap, network-search-free "
+            "merge_backfilled_disclosures) to avoid unnecessary KAP load on a plain rebuild/inspect."
+        ),
+    )
     parser.add_argument("--inspect", action="store_true", help="Skip fetching/building; just re-summarize the dataset already on disk")
     parser.add_argument("--pdf-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_CACHE_DIR)
     parser.add_argument("--ocr-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_OCR_CACHE_DIR)
@@ -184,20 +206,6 @@ def main(argv: list[str] | None = None) -> int:
         process_disclosure_documents(d, config=config, cache=pdf_cache, cache_only=True, ocr_scanned=True, ocr_cache=ocr_cache)
         for d in matched
     ]
-    # Cheap, network-search-free: only re-attaches whatever an earlier
-    # scripts/backfill_kap_history.py run already found and cached.
-    # Issuer-IR supplementary documents are deliberately never merged in
-    # here — see halka_arz_advisor.historical_dataset's module docstring.
-    processed = merge_backfilled_disclosures(
-        processed,
-        ipo_records=ipo_records,
-        application_records=application_records,
-        backfill_cache=BackfillCache(args.backfill_cache_dir),
-        pdf_cache=pdf_cache,
-        config=config,
-        ocr_scanned=True,
-        ocr_cache=ocr_cache,
-    )
 
     disclosures_by_record: dict[str, list[KapDisclosure]] = {}
     for d in processed:
@@ -205,6 +213,89 @@ def main(argv: list[str] | None = None) -> int:
             disclosures_by_record.setdefault(d.matched_spk_record_id, []).append(d)
 
     ipo_by_identity = {ipo_identity(r): r for r in ipo_records}
+    application_by_identity = {application_identity(r): r for r in application_records}
+    backfill_cache = BackfillCache(args.backfill_cache_dir)
+    # Issuer-IR supplementary documents are deliberately never merged in
+    # here (neither branch below) — see
+    # halka_arz_advisor.historical_dataset's module docstring for why.
+
+    if args.hydrate:
+        # Scoped to completed IPOs only (ipo_by_identity), not every
+        # pending SPK application — this dataset only ever builds a
+        # snapshot for a matched completed IPO (see the main loop
+        # below), so hydrating an application-only record_id would be
+        # pure wasted KAP load for this command's own purposes (that's
+        # scripts/backfill_kap_history.py's broader job instead).
+        record_ids = set(ipo_by_identity)
+        if wanted_tickers is not None:
+            record_ids = {
+                rid for rid in record_ids
+                if (ipo_by_identity[rid].borsa_kodu or "").strip().upper() in wanted_tickers
+            }
+        print(f"Hydrating {len(record_ids)} compan(y/ies) still missing a readable official document...", file=sys.stderr)
+        try:
+            with KapClient(config) as kap_client:
+                for record_id in sorted(record_ids):
+                    current = disclosures_by_record.get(record_id, [])
+                    application_record = _find_application_record(current, tuple(application_records))
+                    outcome = search_and_backfill(
+                        record_id,
+                        ipo_record=ipo_by_identity.get(record_id),
+                        application_record=application_record,
+                        current_disclosures=current,
+                        ipo_records=ipo_records,
+                        application_records=application_records,
+                        cache=backfill_cache,
+                        kap_client=kap_client,
+                        pdf_cache=pdf_cache,
+                        config=config,
+                        ocr_scanned=True,
+                        ocr_cache=ocr_cache,
+                        reference_date=datetime.now(UTC).date(),
+                    )
+                    if outcome.disclosures:
+                        # Reprocessed-and-fresh disclosures from this
+                        # call, keyed to dedupe against what was already
+                        # in `current` (reprocess_backfilled_disclosures
+                        # re-reads everything backfill already knows).
+                        by_id = {d.disclosure_id: d for d in current}
+                        by_id.update({d.disclosure_id: d for d in outcome.disclosures})
+                        disclosures_by_record[record_id] = list(by_id.values())
+                    if outcome.searched:
+                        print(
+                            f"  {record_id}: searched {outcome.window[0]}..{outcome.window[1]}, "
+                            f"recovered {outcome.recovered_document_types or '(nothing)'}",
+                            file=sys.stderr,
+                        )
+        except KapApiError as exc:
+            # A persistent failure (e.g. HTTP 429 after this project's
+            # own bounded retry/backoff already ran) most likely means
+            # every subsequent request would fail the same way — stop
+            # hydrating rather than hammer the endpoint further. Every
+            # company hydrated before this one already had its
+            # BackfillEntry persisted individually (search_and_backfill
+            # saves per-company), so build proceeds below with whatever
+            # was actually recovered this run, not nothing.
+            print(f"Hydration stopped early ({type(exc).__name__}: {exc}) — prior progress preserved, continuing with what's already cached", file=sys.stderr)
+    else:
+        # Cheap, network-search-free: only re-attaches whatever an
+        # earlier scripts/backfill_kap_history.py (or an earlier
+        # --hydrate run of this same script) already found and cached.
+        merged = merge_backfilled_disclosures(
+            processed,
+            ipo_records=ipo_records,
+            application_records=application_records,
+            backfill_cache=backfill_cache,
+            pdf_cache=pdf_cache,
+            config=config,
+            ocr_scanned=True,
+            ocr_cache=ocr_cache,
+        )
+        disclosures_by_record = {}
+        for d in merged:
+            if d.matched_spk_record_id:
+                disclosures_by_record.setdefault(d.matched_spk_record_id, []).append(d)
+
     evds_cache = EvdsCache(args.evds_cache_dir)
     bist100_observations = evds_cache.get_observations("bist100_index")
     bulletin_cache = BulletinCache(args.bulletin_cache_dir)

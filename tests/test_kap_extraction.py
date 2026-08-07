@@ -105,6 +105,33 @@ def test_extract_subscription_dates_halka_arz_suresi_no_space_before_ile():
     assert end[0] == date(2026, 8, 3)
 
 
+def test_extract_subscription_dates_trailing_anchor_when_heading_is_lost_to_ocr():
+    # Real shape (folded/paraphrased from GOLDA's actual 2026
+    # announcement, OCR'd): the "Halka Arz Süresi" heading itself did
+    # not survive OCR at all — only the sentence body did — so the
+    # heading-anchored pattern alone would never match even though the
+    # date range OCR'd cleanly. The trailing "tarihleri arasında ...
+    # satışa sunulacaktır" grammar is what actually anchors this case.
+    text = (
+        "alka arz edilecek olan 87.499.998 TL nominal degerli 87.499.998 adet\n"
+        "B Grubu hamiline yazılı paylar 01/07/2026 ile 02/07/2026 tarihleri arasında 2 iş günü süreyle\n"
+        "satışa sunulacaktır."
+    )
+    start, end = extract_subscription_dates(text)
+    assert start[0] == date(2026, 7, 1)
+    assert end[0] == date(2026, 7, 2)
+
+
+def test_extract_subscription_dates_trailing_anchor_ignores_unrelated_date_range():
+    # Real false-positive risk (folded/paraphrased from METEN's actual
+    # 44-page prospectus): a bare "DATE ile DATE tarihleri arasında" can
+    # appear for something completely unrelated (here, an EPDK
+    # electricity-tariff period) — the trailing pattern must not match
+    # this, since there is no "satışa sunulacaktır" nearby.
+    text = "06.01.2017 ile 01.03.2017 tarihleri arasında 500 TL/MWh olarak belirlenmiştir."
+    assert extract_subscription_dates(text) == (None, None)
+
+
 # --------------------------------------------------------------------------
 # Offering price / currency
 # --------------------------------------------------------------------------

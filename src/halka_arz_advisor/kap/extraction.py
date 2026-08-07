@@ -214,6 +214,26 @@ def _re(pattern: str) -> re.Pattern[str]:
 _SUBSCRIPTION_DATE_ANCHOR = r"(?:halka\s+arz\s+suresi|talep\s+toplama)"
 _SUBSCRIPTION_DATE_RANGE_RE = _re(rf"{_SUBSCRIPTION_DATE_ANCHOR}[\s\S]{{0,160}}?({_DATE})\s*(?:-|ile)\s*({_DATE})")
 
+# Second, trailing-anchored form — confirmed live on 2026-08-08 against
+# GOLDA's real 2026 announcement, where OCR dropped the "Halka Arz
+# Süresi" heading text itself (only "...adet\nB Grubu hamiline yazılı
+# paylar 01/07/2026 ile 02/07/2026 tarihleri arasında 2 iş günü süreyle
+# \nsatışa sunulacaktır." survived — no heading at all before it), so
+# the heading-anchored pattern above never gets a chance to match even
+# though the date range itself OCR'd cleanly. Anchoring on the date
+# range's own trailing grammar instead ("tarihleri arasında" then,
+# within a further short gap, "satışa sunulacaktır") needs no heading.
+# This trailing phrase combination is deliberately specific enough not
+# to false-match an unrelated "DATE ile DATE tarihleri arasında" elsewhere
+# in a long prospectus (confirmed against a real false-positive case in
+# METEN's own 44-page prospectus — an EPDK electricity-tariff sentence,
+# "06.01.2017 ile 01.03.2017 tarihleri arasında 500 TL/MWh olarak
+# belirlenmiştir" — which has no nearby "satışa sunulacaktır" and so
+# correctly does not match this pattern).
+_SUBSCRIPTION_DATE_RANGE_TRAILING_RE = _re(
+    rf"({_DATE})\s*(?:-|ile)\s*({_DATE})\s*tarihleri\s+arasinda[\s\S]{{0,80}}?satisa\s+sunulacaktir"
+)
+
 # "Halka arz satış fiyatı olarak belirlenen 76,60 TL" — observed live in a
 # real Fiyat Tespit Raporu.
 _PRICE_NARRATIVE_RE = _re(rf"belirlenen\s+({_NUM})\s*tl")
@@ -269,7 +289,7 @@ def _search(folded: str, original: str, pattern: re.Pattern[str], group: int = 1
 
 def extract_subscription_dates(text: str) -> tuple[tuple[date, str] | None, tuple[date, str] | None]:
     folded = fold_turkish(text)
-    match = _SUBSCRIPTION_DATE_RANGE_RE.search(folded)
+    match = _SUBSCRIPTION_DATE_RANGE_RE.search(folded) or _SUBSCRIPTION_DATE_RANGE_TRAILING_RE.search(folded)
     if not match:
         return None, None
     snippet = text[match.start() : match.end()]

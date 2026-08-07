@@ -152,26 +152,42 @@ def main(argv: list[str] | None = None) -> int:
     reference_date = date.today()
 
     results = []
+    stopped_early_reason: str | None = None
     with KapClient(config) as kap_client:
         for record_id in sorted(record_ids):
             current = disclosures_by_record.get(record_id, [])
             before = missing_document_types(current)
 
-            outcome = search_and_backfill(
-                record_id,
-                ipo_record=ipo_by_identity.get(record_id),
-                application_record=application_by_identity.get(record_id),
-                current_disclosures=current,
-                ipo_records=ipo_records,
-                application_records=application_records,
-                cache=backfill_cache,
-                kap_client=kap_client,
-                pdf_cache=pdf_cache,
-                config=config,
-                ocr_scanned=args.ocr_scanned,
-                ocr_cache=ocr_cache,
-                reference_date=reference_date,
-            )
+            try:
+                outcome = search_and_backfill(
+                    record_id,
+                    ipo_record=ipo_by_identity.get(record_id),
+                    application_record=application_by_identity.get(record_id),
+                    current_disclosures=current,
+                    ipo_records=ipo_records,
+                    application_records=application_records,
+                    cache=backfill_cache,
+                    kap_client=kap_client,
+                    pdf_cache=pdf_cache,
+                    config=config,
+                    ocr_scanned=args.ocr_scanned,
+                    ocr_cache=ocr_cache,
+                    reference_date=reference_date,
+                )
+            except KapApiError as exc:
+                # A persistent failure (e.g. HTTP 429 after this
+                # project's own bounded retry/backoff already ran) most
+                # likely means every subsequent request would fail the
+                # same way — stop here rather than hammer the endpoint
+                # further. Every record_id processed before this one
+                # already had its BackfillEntry persisted individually
+                # (search_and_backfill saves per-company, not in one
+                # final batch), so that progress is not lost; only the
+                # remaining, not-yet-attempted companies are skipped
+                # this run and will be retried on the next one.
+                print(f"  {record_id}: FAILED ({type(exc).__name__}: {exc}) — stopping this run, prior progress preserved", file=sys.stderr)
+                stopped_early_reason = f"{type(exc).__name__}: {exc}"
+                break
 
             after = missing_document_types(list(current) + list(outcome.disclosures))
             results.append(
@@ -192,7 +208,7 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
 
-    print(json.dumps({"companies": results}, indent=2, ensure_ascii=False))
+    print(json.dumps({"companies": results, "stopped_early_reason": stopped_early_reason}, indent=2, ensure_ascii=False))
     return 0
 
 

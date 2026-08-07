@@ -122,7 +122,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Literal
 
-from .extraction import ExtractionMethod, SourceRef
+from .extraction import ExtractionMethod, SourceRef, SourceSystem
 from .pdf import PdfPage
 from .text import fold_turkish
 
@@ -397,6 +397,7 @@ def extract_financial_observations_from_pages(
     disclosure_id: str,
     attachment_url: str,
     extraction_method: ExtractionMethod = "digital",
+    source_system: SourceSystem = "kap",
 ) -> tuple[FinancialObservation, ...]:
     """Run every metric's table-row extractor (see :data:`_METRIC_HEADINGS`)
     over ``pages``, keeping the *first* page each metric's table is found
@@ -414,7 +415,7 @@ def extract_financial_observations_from_pages(
                 continue
 
             row_values, currency, scale, consolidation_scope = found
-            source = SourceRef(document_type, disclosure_id, attachment_url, page.number, extraction_method)
+            source = SourceRef(document_type, disclosure_id, attachment_url, page.number, extraction_method, source_system)
             for row_value in row_values:
                 observations.append(
                     FinancialObservation(

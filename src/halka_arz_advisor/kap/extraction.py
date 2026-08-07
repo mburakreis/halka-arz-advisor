@@ -100,6 +100,16 @@ PROSPECTUS_PRIORITY_FIELDS = frozenset(
 
 ExtractionMethod = Literal["digital", "ocr"]
 
+# Where the *document* this observation came from was itself published
+# — "kap" (the default everywhere in this module) for a KAP disclosure,
+# "issuer_ir" for a PDF discovered on the issuer's own investor-relations
+# site (see :mod:`halka_arz_advisor.issuer_ir`). Purely provenance
+# metadata: it plays no role in extraction itself, only in how two
+# disagreeing observations are later prioritized (KAP is always
+# authoritative — see
+# :func:`halka_arz_advisor.kap.extraction.apply_lower_authority_fallback`).
+SourceSystem = Literal["kap", "issuer_ir"]
+
 
 @dataclass(frozen=True, slots=True)
 class SourceRef:
@@ -110,6 +120,7 @@ class SourceRef:
     attachment_url: str
     page_number: int | None
     extraction_method: ExtractionMethod = "digital"
+    source_system: SourceSystem = "kap"
 
 
 @dataclass(frozen=True, slots=True)
@@ -665,6 +676,7 @@ def extract_observations_from_pages(
     disclosure_id: str,
     attachment_url: str,
     extraction_method: ExtractionMethod = "digital",
+    source_system: SourceSystem = "kap",
 ) -> dict[str, FieldObservation]:
     """Run every field extractor over ``pages`` (in page order), keeping
     the *first* match found for each field, with its page number.
@@ -688,14 +700,14 @@ def extract_observations_from_pages(
             observations["subscription_start_date"] = FieldObservation(
                 value=value,
                 raw_snippet=snippet,
-                source=SourceRef(document_type, disclosure_id, attachment_url, page.number, extraction_method),
+                source=SourceRef(document_type, disclosure_id, attachment_url, page.number, extraction_method, source_system),
             )
         if end and "subscription_end_date" not in observations:
             value, snippet = end
             observations["subscription_end_date"] = FieldObservation(
                 value=value,
                 raw_snippet=snippet,
-                source=SourceRef(document_type, disclosure_id, attachment_url, page.number, extraction_method),
+                source=SourceRef(document_type, disclosure_id, attachment_url, page.number, extraction_method, source_system),
             )
 
     for field_name, extractor in _SCALAR_EXTRACTORS:
@@ -706,7 +718,7 @@ def extract_observations_from_pages(
                 observations[field_name] = FieldObservation(
                     value=value,
                     raw_snippet=snippet,
-                    source=SourceRef(document_type, disclosure_id, attachment_url, page.number, extraction_method),
+                    source=SourceRef(document_type, disclosure_id, attachment_url, page.number, extraction_method, source_system),
                 )
                 break
 
@@ -719,7 +731,7 @@ def extract_observations_from_pages(
                 observations[field_name] = FieldObservation(
                     value=value,
                     raw_snippet=snippet,
-                    source=SourceRef(document_type, disclosure_id, attachment_url, page.number, extraction_method),
+                    source=SourceRef(document_type, disclosure_id, attachment_url, page.number, extraction_method, source_system),
                 )
                 break
 
@@ -843,6 +855,33 @@ def build_extracted_facts(
             ipo_results_observations.get(field_name),
             price_determination_report_observations.get(field_name),
         )
+        for field_name in FIELD_NAMES
+    }
+    return ExtractedFacts(**merged)
+
+
+def apply_lower_authority_fallback(primary: ExtractedFacts | None, fallback: ExtractedFacts | None) -> ExtractedFacts | None:
+    """Combine two already-built :class:`ExtractedFacts` — typically
+    KAP's own (``primary``) and a lower-authority source's (``fallback``,
+    e.g. :mod:`halka_arz_advisor.issuer_ir`) — field by field, with
+    ``primary`` always winning.
+
+    A field only ever comes from ``fallback`` when ``primary`` has
+    genuinely nothing for it (``status == "not_found"``) — a ``primary``
+    field that's ``"extracted"`` *or* ``"conflicting"`` is returned
+    completely unchanged, so a fallback source can never silently
+    override, "resolve", or get averaged into an authoritative or
+    already-flagged-conflicting value. Once ``primary`` gains a value
+    for a field a fallback previously filled, ``primary`` takes back
+    over automatically on the next call — there's no separate "locked
+    in" fallback state to update.
+    """
+    if primary is None:
+        return fallback
+    if fallback is None:
+        return primary
+    merged = {
+        field_name: (primary_fact if (primary_fact := getattr(primary, field_name)).status != "not_found" else getattr(fallback, field_name))
         for field_name in FIELD_NAMES
     }
     return ExtractedFacts(**merged)

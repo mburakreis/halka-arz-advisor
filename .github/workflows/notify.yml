@@ -33,25 +33,26 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: uv run python scripts/check_and_notify.py --state-file state/seen_records.json
 
-      # actions/cache's post-job save step needs all four paths to
+      # actions/cache's post-job save step needs all five paths to
       # exist — normally guaranteed by the fetch/backfill/analysis steps
       # below writing at least one file, but not on a run that matches/
       # analyzes nothing (e.g. no KAP disclosures at all in the
       # lookback window).
       - name: Ensure cache directories exist
-        run: mkdir -p data/cache/kap_pdfs data/cache/llm_analysis data/cache/kap_ocr data/cache/kap_backfill
+        run: mkdir -p data/cache/kap_pdfs data/cache/llm_analysis data/cache/kap_ocr data/cache/kap_backfill data/cache/kap_issuer_ir
 
       # KAP PDFs, Gemini analysis results, OCR text, and the historical-
-      # backfill search state are pure caches (like the rest of
+      # backfill/issuer-IR search state are pure caches (like the rest of
       # data/cache/*, gitignored — see .gitignore), not notification
       # state, so they persist across runs via the Actions cache rather
       # than being committed to the repo like state/seen_records.json
       # below. Restored here, saved automatically at the end of the job.
-      # data/cache/kap_backfill specifically is what lets
-      # scripts/backfill_kap_history.py below skip an already-exhausted
-      # historical search on a later scheduled run instead of repeating
-      # it every hour.
-      - name: Restore KAP PDF, Gemini analysis, OCR, and backfill caches
+      # data/cache/kap_backfill/data/cache/kap_issuer_ir specifically are
+      # what let scripts/backfill_kap_history.py and
+      # scripts/ingest_issuer_ir_documents.py below skip an already-
+      # exhausted search/crawl on a later scheduled run instead of
+      # repeating it every hour.
+      - name: Restore KAP PDF, Gemini analysis, OCR, backfill, and issuer-IR caches
         uses: actions/cache@v4
         with:
           path: |
@@ -59,6 +60,7 @@ jobs:
             data/cache/llm_analysis
             data/cache/kap_ocr
             data/cache/kap_backfill
+            data/cache/kap_issuer_ir
           key: llm-analysis-cache-${{ github.run_id }}
           restore-keys: |
             llm-analysis-cache-
@@ -88,6 +90,18 @@ jobs:
         # below, which work fine off whatever was already cached.
         continue-on-error: true
         run: uv run python scripts/backfill_kap_history.py --ocr-scanned > /dev/null
+
+      - name: Ingest issuer investor-relations documents (KAP-independent fallback)
+        # For a registered issuer (see halka_arz_advisor.issuer_ir.registry)
+        # still missing a supported document type after the KAP steps
+        # above, this crawls that issuer's own IPO page once and ingests
+        # matching same-domain PDFs — deterministic title/link-text
+        # classification only, no LLM. Persisted to
+        # data/cache/kap_issuer_ir/ so an already-satisfied crawl is
+        # never repeated. Best-effort, same as the backfill step: an
+        # unreachable issuer site must not block analysis/notification.
+        continue-on-error: true
+        run: uv run python scripts/ingest_issuer_ir_documents.py --ocr-scanned > /dev/null
 
       - name: Run Gemini analysis for pending IPOs
         # A quota/rate-limit/temporary Gemini error must not fail the

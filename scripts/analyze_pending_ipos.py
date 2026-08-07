@@ -47,6 +47,7 @@ from halka_arz_advisor.gemini.client import GeminiClient  # noqa: E402
 from halka_arz_advisor.gemini.config import load_gemini_config_from_env  # noqa: E402
 from halka_arz_advisor.gemini.exceptions import GeminiError, GeminiUnavailableError  # noqa: E402
 from halka_arz_advisor.gemini.models import AnalysisRecord  # noqa: E402
+from halka_arz_advisor.issuer_ir import IssuerIrCache, collect_supplementary_disclosures  # noqa: E402
 from halka_arz_advisor.kap.backfill import merge_backfilled_disclosures  # noqa: E402
 from halka_arz_advisor.kap.backfill_cache import BackfillCache  # noqa: E402
 from halka_arz_advisor.kap.classification import target_document_types  # noqa: E402
@@ -84,6 +85,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--analysis-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_ANALYSIS_CACHE_DIR)
     parser.add_argument("--ocr-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_OCR_CACHE_DIR)
     parser.add_argument("--backfill-cache-dir", type=Path, default=PROJECT_ROOT / "data" / "cache" / "kap_backfill")
+    parser.add_argument("--issuer-ir-cache-dir", type=Path, default=PROJECT_ROOT / "data" / "cache" / "kap_issuer_ir")
     parser.add_argument("--env-file", type=Path, default=PROJECT_ROOT / ".env")
     return parser.parse_args(argv)
 
@@ -192,12 +194,33 @@ def main(argv: list[str] | None = None) -> int:
         if d.matched_spk_record_id:
             disclosures_by_record.setdefault(d.matched_spk_record_id, []).append(d)
 
+    # Cheap, crawl-free: only re-attaches whatever an earlier
+    # `scripts/ingest_issuer_ir_documents.py` run already found and
+    # cached (see halka_arz_advisor.issuer_ir) — never crawls an
+    # issuer's site itself here. Only feeds the deterministic decision
+    # (KAP is always authoritative for a conflicting value — see
+    # halka_arz_advisor.kap.extraction.apply_lower_authority_fallback);
+    # Gemini's own context/facts below stay KAP-only.
+    supplementary_disclosures = collect_supplementary_disclosures(
+        ipo_records=ipo_records,
+        application_records=application_records,
+        cache=IssuerIrCache(args.issuer_ir_cache_dir),
+        pdf_cache=pdf_cache,
+        config=config,
+        ocr_cache=ocr_cache,
+    )
+
     # The deterministic decision is computed once here, from exactly the
     # same cached data every analysis below explains — see
     # halka_arz_advisor.decision.pipeline's module docstring for why this
     # must be the *same* computation scripts/send_pending_analyses.py
     # later performs (their cache-key derivations must agree).
-    decision_results = compute_decision_results(processed, ipo_records=tuple(ipo_records), application_records=tuple(application_records))
+    decision_results = compute_decision_results(
+        processed,
+        ipo_records=tuple(ipo_records),
+        application_records=tuple(application_records),
+        supplementary_disclosures=supplementary_disclosures,
+    )
 
     # Only companies with both real ExtractedFacts *and* a computed
     # decision are analyzable — a company with disclosures but no

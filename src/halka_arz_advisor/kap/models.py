@@ -15,7 +15,7 @@ from datetime import datetime
 from .attachments import KapAttachment
 from .classification import DocumentType, classify_title
 from .exceptions import KapSchemaError
-from .extraction import ExtractedFacts
+from .extraction import ExtractedFacts, SourceSystem
 from .financials import FinancialObservation
 from .ocr import OcrStatus
 from .pdf import PdfStatus
@@ -38,6 +38,14 @@ class KapDisclosure:
     matched_spk_record_id: str | None
     match_method: str  # "ticker" | "company_name" | "unmatched"
     raw: dict = field(repr=False)
+
+    # "kap" for everything produced by this module (the only value it
+    # ever sets) — a disclosure built instead from an issuer's own
+    # investor-relations site (see :mod:`halka_arz_advisor.issuer_ir`)
+    # is tagged "issuer_ir" so downstream code (coverage/hard-rule
+    # checks, the KAP-authority fallback merge, Telegram/audit display)
+    # can tell the two apart without guessing from ``disclosure_id``.
+    source_system: SourceSystem = "kap"
 
     # Populated by halka_arz_advisor.kap.documents.process_disclosure_documents
     # (only when the CLI is run with --parse-documents) — left at these

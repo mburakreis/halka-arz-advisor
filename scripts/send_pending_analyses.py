@@ -41,6 +41,7 @@ from halka_arz_advisor.decision.pipeline import compute_decision_results, resolv
 from halka_arz_advisor.gemini.cache import AnalysisCache  # noqa: E402
 from halka_arz_advisor.gemini.config import DEFAULT_MODEL  # noqa: E402
 from halka_arz_advisor.gemini.prompt import PROMPT_VERSION  # noqa: E402
+from halka_arz_advisor.issuer_ir import IssuerIrCache, collect_supplementary_disclosures  # noqa: E402
 from halka_arz_advisor.kap.backfill import merge_backfilled_disclosures  # noqa: E402
 from halka_arz_advisor.kap.backfill_cache import BackfillCache  # noqa: E402
 from halka_arz_advisor.kap.classification import target_document_types  # noqa: E402
@@ -87,6 +88,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--analysis-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_ANALYSIS_CACHE_DIR)
     parser.add_argument("--ocr-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_OCR_CACHE_DIR)
     parser.add_argument("--backfill-cache-dir", type=Path, default=PROJECT_ROOT / "data" / "cache" / "kap_backfill")
+    parser.add_argument("--issuer-ir-cache-dir", type=Path, default=PROJECT_ROOT / "data" / "cache" / "kap_issuer_ir")
     parser.add_argument("--state-file", type=Path, default=PROJECT_ROOT / DEFAULT_STATE_FILE)
     parser.add_argument("--env-file", type=Path, default=PROJECT_ROOT / ".env")
     parser.add_argument(
@@ -184,11 +186,28 @@ def main(argv: list[str] | None = None) -> int:
         if d.matched_spk_record_id:
             disclosures_by_record.setdefault(d.matched_spk_record_id, []).append(d)
 
+    # Mirrors scripts/analyze_pending_ipos.py exactly — see that
+    # script's own comment for why only compute_decision_results (never
+    # Gemini's own facts/context) sees the issuer_ir supplement.
+    supplementary_disclosures = collect_supplementary_disclosures(
+        ipo_records=ipo_records,
+        application_records=application_records,
+        cache=IssuerIrCache(args.issuer_ir_cache_dir),
+        pdf_cache=pdf_cache,
+        config=config,
+        ocr_cache=ocr_cache,
+    )
+
     # Computed the exact same way scripts/analyze_pending_ipos.py already
     # did, from the same cached data — required for the Gemini analysis
     # cache key (see halka_arz_advisor.decision.pipeline's module
     # docstring) to line up between the two separate script runs.
-    decision_results = compute_decision_results(processed, ipo_records=tuple(ipo_records), application_records=tuple(application_records))
+    decision_results = compute_decision_results(
+        processed,
+        ipo_records=tuple(ipo_records),
+        application_records=tuple(application_records),
+        supplementary_disclosures=supplementary_disclosures,
+    )
 
     if not decision_results:
         print("No companies with cached, matched documents to consider.", file=sys.stderr)

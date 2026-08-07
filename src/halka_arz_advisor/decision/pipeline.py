@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from datetime import datetime
 
 from ..kap.documents import aggregate_company_facts, aggregate_company_financial_series, infer_company_name_and_ticker
+from ..kap.extraction import apply_lower_authority_fallback
 from ..kap.models import KapDisclosure
 from ..spk.application_list import SpkIpoApplicationRecord
 from ..spk.models import SpkIpoRecord
@@ -99,6 +100,7 @@ def compute_decision_results(
     *,
     ipo_records: tuple[SpkIpoRecord, ...] = (),
     application_records: tuple[SpkIpoApplicationRecord, ...] = (),
+    supplementary_disclosures: Sequence[KapDisclosure] = (),
     reference_date: datetime | None = None,
 ) -> dict[str, DecisionResult]:
     """One :class:`~halka_arz_advisor.decision.engine.DecisionResult` per
@@ -111,29 +113,56 @@ def compute_decision_results(
     result (with ``spk_record``/``application_record`` left ``None``),
     since a genuinely pre-application company can still have real KAP
     data worth scoring.
+
+    ``supplementary_disclosures`` — lower-authority documents (see
+    :mod:`halka_arz_advisor.issuer_ir`) — are folded in via
+    :func:`~halka_arz_advisor.kap.extraction.apply_lower_authority_fallback`:
+    they only ever fill a field ``processed_disclosures`` has genuinely
+    nothing for, never override or get averaged into a KAP-derived value
+    (extracted or conflicting), and a company present *only* in
+    ``supplementary_disclosures`` (no KAP disclosure matched at all yet)
+    still gets a result. They otherwise participate fully — coverage/
+    hard-rule document-presence checks, financial observations — exactly
+    like a KAP disclosure would.
     """
     company_facts = aggregate_company_facts(processed_disclosures)
     company_financials = aggregate_company_financial_series(processed_disclosures)
+
+    supplementary_list = list(supplementary_disclosures)
+    supplementary_facts = aggregate_company_facts(supplementary_list)
+    supplementary_financials = aggregate_company_financial_series(supplementary_list)
 
     disclosures_by_record: dict[str, list[KapDisclosure]] = {}
     for disclosure in processed_disclosures:
         if disclosure.matched_spk_record_id:
             disclosures_by_record.setdefault(disclosure.matched_spk_record_id, []).append(disclosure)
 
+    supplementary_by_record: dict[str, list[KapDisclosure]] = {}
+    for disclosure in supplementary_list:
+        if disclosure.matched_spk_record_id:
+            supplementary_by_record.setdefault(disclosure.matched_spk_record_id, []).append(disclosure)
+
     ipo_by_identity = {_ipo_identity(record): record for record in ipo_records}
 
     results: dict[str, DecisionResult] = {}
-    for record_id, disclosures_for_company in disclosures_by_record.items():
+    for record_id in sorted(set(disclosures_by_record) | set(supplementary_by_record)):
+        primary_for_company = disclosures_by_record.get(record_id, [])
+        supplementary_for_company = supplementary_by_record.get(record_id, [])
+        combined_disclosures = tuple(primary_for_company) + tuple(supplementary_for_company)
+
+        facts = apply_lower_authority_fallback(company_facts.get(record_id), supplementary_facts.get(record_id))
+        financial_observations = tuple(company_financials.get(record_id, ())) + tuple(supplementary_financials.get(record_id, ()))
+
         company_name, _ticker = resolve_company_identity(
-            record_id, disclosures_for_company, ipo_records=ipo_records, application_records=application_records
+            record_id, list(combined_disclosures), ipo_records=ipo_records, application_records=application_records
         )
         inputs = CompanyDecisionInputs(
             spk_record_id=record_id,
             spk_record=ipo_by_identity.get(record_id),
-            application_record=_find_application_record(disclosures_for_company, application_records),
-            facts=company_facts.get(record_id),
-            disclosures=tuple(disclosures_for_company),
-            financial_observations=company_financials.get(record_id, ()),
+            application_record=_find_application_record(list(combined_disclosures), application_records),
+            facts=facts,
+            disclosures=combined_disclosures,
+            financial_observations=financial_observations,
             company_name=company_name,
         )
         snapshot = build_decision_snapshot(inputs, reference_date=reference_date)

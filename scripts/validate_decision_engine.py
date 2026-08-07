@@ -36,6 +36,7 @@ from halka_arz_advisor.decision.engine import (  # noqa: E402
     unavailable_high_weight_features,
 )
 from halka_arz_advisor.decision.pipeline import compute_decision_results, resolve_company_identity  # noqa: E402
+from halka_arz_advisor.issuer_ir import IssuerIrCache, collect_supplementary_disclosures  # noqa: E402
 from halka_arz_advisor.kap.backfill import merge_backfilled_disclosures  # noqa: E402
 from halka_arz_advisor.kap.backfill_cache import BackfillCache  # noqa: E402
 from halka_arz_advisor.kap.classification import target_document_types  # noqa: E402
@@ -64,11 +65,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pdf-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_CACHE_DIR)
     parser.add_argument("--ocr-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_OCR_CACHE_DIR)
     parser.add_argument("--backfill-cache-dir", type=Path, default=PROJECT_ROOT / "data" / "cache" / "kap_backfill")
+    parser.add_argument("--issuer-ir-cache-dir", type=Path, default=PROJECT_ROOT / "data" / "cache" / "kap_issuer_ir")
     parser.add_argument("--env-file", type=Path, default=PROJECT_ROOT / ".env")
     parser.add_argument("--min-coverage", type=float, default=0.0, help="Only include companies with at least one category above this weighted coverage (default: 0.0 = include all)")
     parser.add_argument(
         "--no-backfill", action="store_true",
         help="Skip merging in previously backfilled historical documents (see scripts/backfill_kap_history.py) — recent-window data only",
+    )
+    parser.add_argument(
+        "--no-issuer-ir", action="store_true",
+        help="Skip merging in previously ingested issuer-IR documents (see scripts/ingest_issuer_ir_documents.py)",
     )
     return parser.parse_args(argv)
 
@@ -145,14 +151,33 @@ def main(argv: list[str] | None = None) -> int:
         if d.matched_spk_record_id:
             disclosures_by_record.setdefault(d.matched_spk_record_id, []).append(d)
 
-    if not disclosures_by_record:
+    supplementary_disclosures: list[KapDisclosure] = []
+    if not args.no_issuer_ir:
+        # Cheap, crawl-free: only re-attaches whatever an earlier
+        # `scripts/ingest_issuer_ir_documents.py` run already found and
+        # cached — never crawls an issuer's site itself here.
+        supplementary_disclosures = collect_supplementary_disclosures(
+            ipo_records=ipo_records,
+            application_records=application_records,
+            cache=IssuerIrCache(args.issuer_ir_cache_dir),
+            pdf_cache=pdf_cache,
+            config=config,
+            ocr_scanned=True,
+            ocr_cache=ocr_cache,
+        )
+
+    if not disclosures_by_record and not supplementary_disclosures:
         print("No companies with cached, matched documents to evaluate.", file=sys.stderr)
         print(json.dumps({"companies": []}, indent=2))
         return 0
 
     reference_date = datetime.now()
     decision_results = compute_decision_results(
-        processed, ipo_records=tuple(ipo_records), application_records=tuple(application_records), reference_date=reference_date
+        processed,
+        ipo_records=tuple(ipo_records),
+        application_records=tuple(application_records),
+        supplementary_disclosures=supplementary_disclosures,
+        reference_date=reference_date,
     )
     print(f"{len(decision_results)} compan(y/ies) evaluated by the decision engine", file=sys.stderr)
 

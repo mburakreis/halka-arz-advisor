@@ -54,7 +54,7 @@ from ..probe.config import ProbeConfig
 from ..spk.application_list import SpkIpoApplicationRecord
 from ..spk.models import SpkIpoRecord
 from .backfill_cache import BackfillCache, BackfillDisclosureSeed, BackfillEntry
-from .classification import DocumentType, TARGET_DOCUMENT_TYPES
+from .classification import DocumentType, TARGET_DOCUMENT_TYPES, classify_prospectus_document_role
 from .client import KapClient
 from .documents import process_disclosure_documents
 from .matching import match_disclosure
@@ -105,17 +105,35 @@ class BackfillOutcome:
     window: tuple[date, date] | None
 
 
+def _is_readable(disclosure: KapDisclosure) -> bool:
+    return disclosure.pdf_status == "ok" or disclosure.ocr_status in ("ocr_ok", "ocr_partial")
+
+
+def _satisfies_document_type(disclosure: KapDisclosure) -> bool:
+    """Whether a readable ``disclosure`` actually counts as *having*
+    its ``document_type`` — plain readability for every type except
+    ``approved_prospectus``, where a whole bundle of exhibits (audit/
+    valuation/legal/charter/fund-use reports, ...) shares that same KAP
+    classification alongside the real prospectus body (see
+    :func:`~halka_arz_advisor.kap.classification.classify_prospectus_document_role`'s
+    docstring) — only a ``"base_document"``-role one satisfies it."""
+    if not _is_readable(disclosure):
+        return False
+    if disclosure.document_type != "approved_prospectus":
+        return True
+    return classify_prospectus_document_role(disclosure.summary, disclosure.title) == "base_document"
+
+
 def missing_document_types(disclosures_for_company: Sequence[KapDisclosure]) -> tuple[DocumentType, ...]:
     """Which of the five supported document types this company has no
     *readable* disclosure for yet — a digital-text-layer PDF
     (``pdf_status == "ok"``) or a usable OCR fallback
     (``ocr_status in ("ocr_ok", "ocr_partial")``); an attachment that
-    merely exists but never parsed doesn't count."""
-    found = {
-        d.document_type
-        for d in disclosures_for_company
-        if d.document_type in TARGET_DOCUMENT_TYPES and (d.pdf_status == "ok" or d.ocr_status in ("ocr_ok", "ocr_partial"))
-    }
+    merely exists but never parsed doesn't count. For
+    ``approved_prospectus`` specifically, a readable *exhibit* (as
+    opposed to the base document itself or one of its parts/revisions)
+    doesn't count either — see :func:`_satisfies_document_type`."""
+    found = {d.document_type for d in disclosures_for_company if d.document_type in TARGET_DOCUMENT_TYPES and _satisfies_document_type(d)}
     return tuple(t for t in TARGET_DOCUMENT_TYPES if t not in found)
 
 
@@ -284,23 +302,46 @@ def _search_historical_disclosures(
     — reusing :func:`~halka_arz_advisor.kap.matching.match_disclosure`
     unmodified, so an ambiguous historical disclosure (matches more than
     one SPK record) is left unmatched exactly like it would be in the
-    normal recent-window flow, never guessed at here."""
+    normal recent-window flow, never guessed at here.
+
+    Stops searching a document type as soon as one readable disclosure
+    of it is found — except ``approved_prospectus``, which (see
+    :func:`~halka_arz_advisor.kap.classification.classify_prospectus_document_role`)
+    is routinely filed as several separate disclosures (multi-part
+    splits, later whole-document corrections) interleaved with unrelated
+    exhibits under the very same KAP classification. For that type, an
+    exhibit-role candidate is skipped without even being fetched (cheap
+    — the role is decided from ``summary``/``title`` alone), and finding
+    one base-document-role hit doesn't immediately end the search: every
+    real bundle observed live was filed within a single ~30-day chunk
+    (occasionally with a correction a few days later), so the search
+    instead keeps going until one whole chunk contributes no *new*
+    base-document hit — bounding the extra cost to at most one trailing
+    chunk beyond the bundle's own, rather than scanning the entire
+    (up to 400-day) window unconditionally."""
     if window_from > window_to:
         return []
 
     still_wanted = set(types_to_find)
     found: list[KapDisclosure] = []
+    seen_disclosure_ids: set[str] = set()
+    prospectus_hits_total = 0
 
     for chunk_from, chunk_to in _date_chunks(window_from, window_to, _SEARCH_CHUNK_DAYS):
         if not still_wanted:
             break
         candidates = kap_client.fetch_disclosures(chunk_from, chunk_to)
+        prospectus_hits_this_chunk = 0
         for disclosure in candidates:
-            if disclosure.document_type not in still_wanted:
+            if disclosure.document_type not in still_wanted or disclosure.disclosure_id in seen_disclosure_ids:
+                continue
+            is_prospectus = disclosure.document_type == "approved_prospectus"
+            if is_prospectus and classify_prospectus_document_role(disclosure.summary, disclosure.title) == "attachment":
                 continue
             matched = match_disclosure(disclosure, ipo_records=ipo_records, application_records=application_records)
             if matched.matched_spk_record_id != record_id:
                 continue
+            seen_disclosure_ids.add(disclosure.disclosure_id)
             processed = process_disclosure_documents(
                 matched,
                 config=config,
@@ -312,8 +353,16 @@ def _search_historical_disclosures(
                 ocr_cache=ocr_cache,
             )
             found.append(processed)
-            if processed.pdf_status == "ok" or processed.ocr_status in ("ocr_ok", "ocr_partial"):
+            readable = processed.pdf_status == "ok" or processed.ocr_status in ("ocr_ok", "ocr_partial")
+            if is_prospectus:
+                if readable:
+                    prospectus_hits_this_chunk += 1
+                    prospectus_hits_total += 1
+            elif readable:
                 still_wanted.discard(disclosure.document_type)
+
+        if "approved_prospectus" in still_wanted and prospectus_hits_total > 0 and prospectus_hits_this_chunk == 0:
+            still_wanted.discard("approved_prospectus")
 
     return found
 
@@ -375,9 +424,7 @@ def search_and_backfill(
         ocr_scanned=ocr_scanned, ocr_cache=ocr_cache, ocr_config=ocr_config,
     )
 
-    recovered_types = tuple(
-        sorted({d.document_type for d in found if d.pdf_status == "ok" or d.ocr_status in ("ocr_ok", "ocr_partial")})
-    )
+    recovered_types = tuple(sorted({d.document_type for d in found if _satisfies_document_type(d)}))
     exhausted = tuple(sorted(set(entry.exhausted_document_types if entry else ()) | (set(still_missing) - set(recovered_types))))
     new_seeds = tuple(
         BackfillDisclosureSeed.from_disclosure(d) for d in found if d.matched_spk_record_id == record_id

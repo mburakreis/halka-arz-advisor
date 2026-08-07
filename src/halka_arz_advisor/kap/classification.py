@@ -91,6 +91,73 @@ TARGET_DOCUMENT_TYPES: tuple[DocumentType, ...] = (
     "trading_start",
 )
 
+# A real IPO's approved prospectus is not filed as one single KAP
+# disclosure. Confirmed live across 9 real tickers (2026-08-07): every
+# "approved_prospectus"-classified disclosure carries the exact same
+# generic boilerplate *title* ("İzahname (SPK Tarafından Onaylanan)"),
+# but KAP's own *summary* field for each individual filing in the bundle
+# reveals its real content — the base document's own body text (often
+# split across several disclosures, e.g. "İzahname 1. Bölüm" .. "N.
+# Bölüm", or reposted whole as a correction, e.g. "İzahname - Düzeltme"),
+# versus a separate supporting exhibit filed under the same disclosure
+# type (audit report, valuation report, legal counsel report, articles
+# of association, fund-usage report, trade-registry-gazette notice,
+# ...). Treating every one of these as interchangeable is the root cause
+# of :mod:`halka_arz_advisor.kap.backfill` recovering, for most tickers,
+# a small standalone exhibit instead of the actual prospectus body.
+#
+# ``PROSPECTUS_ATTACHMENT_KEYWORDS`` are generic Turkish document-type
+# nouns (never a ticker/company name), stem-matched (folded, substring)
+# so Turkish case suffixes (raporu/raporları/raporlari/...) don't defeat
+# the match. ``_PROSPECTUS_ATTACHMENT_MARKER_RE`` separately catches the
+# "Ek"/"Eki"/"Ekleri" appendix-numbering convention (e.g. "Ek-1", "EK_5",
+# "Ek 5.A", "ekleri") without false-matching an unrelated word that
+# merely starts with "ek" (e.g. "eksik", "ekonomi").
+PROSPECTUS_ATTACHMENT_KEYWORDS: tuple[str, ...] = (
+    "esas sozlesme",
+    "ic yonerge",
+    "denetim rapor",
+    "denetim kurulu",
+    "hukukcu rapor",
+    "degerleme rapor",
+    "degerleme kurulu",
+    "sorumluluk beyan",
+    "fiyat tespit rapor",
+    "fon kullanim",
+    "kullanim yeri",
+    "yonetim kurulu",
+    "ttsg",
+    "katilim finans",
+    "gayrimenkul",
+)
+
+_PROSPECTUS_ATTACHMENT_MARKER_RE = re.compile(r"\bek[\s_.\-]*\d|\bekleri\b|\beki\b")
+
+ProspectusDocumentRole = Literal["base_document", "attachment"]
+
+
+def classify_prospectus_document_role(summary: str, title: str = "") -> ProspectusDocumentRole:
+    """Distinguish the base prospectus (or one of its parts/full
+    revisions) from a supporting exhibit filed under the same
+    ``approved_prospectus`` KAP classification — see the module-level
+    note above ``PROSPECTUS_ATTACHMENT_KEYWORDS`` for why this can't be
+    done from ``title`` alone (KAP files it identically for both).
+
+    Only meaningful for a disclosure :func:`classify_title` already put
+    in ``"approved_prospectus"``. A disclosure whose summary doesn't
+    even mention "izahname" (e.g. a bare trade-registry-gazette or
+    internal-regulation notice bundled into the same filing) is treated
+    as an ``"attachment"`` too — it's never the base document itself.
+    """
+    folded = fold_turkish(summary) or fold_turkish(title)
+    if "izahname" not in folded:
+        return "attachment"
+    if _PROSPECTUS_ATTACHMENT_MARKER_RE.search(folded):
+        return "attachment"
+    if any(keyword in folded for keyword in PROSPECTUS_ATTACHMENT_KEYWORDS):
+        return "attachment"
+    return "base_document"
+
 
 def classify_title(title: str) -> DocumentType:
     """Classify a disclosure title using substring matching on folded text."""

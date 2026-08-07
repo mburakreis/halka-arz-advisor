@@ -145,6 +145,73 @@ def test_already_backfilled_company_skips_a_repeat_historical_search(httpx_mock,
     assert second.disclosures[0].pdf_status == "ok"
 
 
+def test_backfill_recovers_every_base_prospectus_part_and_skips_exhibits(httpx_mock, build_pdf_bytes, tmp_path):
+    """Regression test for the real bug this fixes: KAP files a
+    company's base prospectus as several separate disclosures (multi-
+    part splits and/or later whole-document corrections) interleaved
+    with unrelated exhibits (audit/valuation/legal/charter reports),
+    all sharing the identical generic 'İzahname (SPK Tarafından
+    Onaylanan)' title and the same approved_prospectus classification.
+    The old 'stop at the first readable hit' logic grabbed whichever one
+    happened to come first — often a short exhibit, never the real body.
+    This asserts both real base-document parts are recovered and the
+    exhibit is never even fetched (no PDF mock is registered for it —
+    fetching it would fail the test with an unmatched request)."""
+    ipo_record = _ipo_record()
+    record_id = "ipo:TESTX:2026 / 6"
+
+    def item(disclosure_id: str, summary: str, published_at: str) -> dict:
+        raw = _raw_kap_item(disclosure_id=disclosure_id, title="İzahname (SPK Tarafından Onaylanan)", stock_code="TESTX", published_at=published_at)
+        raw["disclosureBasic"]["summary"] = summary
+        return raw
+
+    httpx_mock.add_response(
+        url=KAP_DISCLOSURE_LIST_URL,
+        json=[
+            item("d-base-1", "Test Enerji A.Ş. İzahname 1. Bölüm", "10.03.2026 10:00:00"),
+            item("d-exhibit", "Test Enerji A.Ş. İzahname Ek-1 Esas Sözleşme", "10.03.2026 10:05:00"),
+            item("d-base-2", "Test Enerji A.Ş. İzahname 2. Bölüm", "10.03.2026 10:10:00"),
+        ],
+        is_reusable=True,
+    )
+    # d-base-1 and d-base-2 share this test's single hardcoded
+    # DISCLOSURE_INDEX (see _raw_kap_item), so both resolve to the same
+    # attachment obj_id — the second's PDF read is then a PdfCache hit,
+    # never a second download. What matters here is that both
+    # disclosure_ids are recovered/persisted; d-exhibit's is never
+    # fetched at all (no detail/download mock would satisfy it if it
+    # tried — pytest-httpx fails the test on an unmatched request).
+    httpx_mock.add_response(url=ATTACHMENT_DETAIL_URL_TEMPLATE.format(index=DISCLOSURE_INDEX), json=_detail_payload("obj-base-1"), is_reusable=True)
+    httpx_mock.add_response(url=FILE_DOWNLOAD_URL_TEMPLATE.format(obj_id="obj-base-1"), content=build_pdf_bytes(text="halka arz ile ilgili metin bolum 1"))
+
+    cache = BackfillCache(tmp_path / "backfill")
+    pdf_cache = PdfCache(tmp_path / "pdfs")
+
+    with KapClient(fast_config()) as kap_client:
+        outcome = search_and_backfill(
+            record_id,
+            ipo_record=ipo_record,
+            application_record=None,
+            current_disclosures=[],
+            ipo_records=[ipo_record],
+            application_records=[],
+            cache=cache,
+            kap_client=kap_client,
+            pdf_cache=pdf_cache,
+            config=fast_config(),
+            reference_date=date(2026, 8, 7),
+        )
+
+    assert outcome.recovered_document_types == ("approved_prospectus",)
+    recovered_ids = {d.disclosure_id for d in outcome.disclosures}
+    assert recovered_ids == {"d-base-1", "d-base-2"}
+
+    entry = cache.get(record_id)
+    assert entry is not None
+    seed_ids = {s.disclosure_id for s in entry.seeds}
+    assert seed_ids == {"d-base-1", "d-base-2"}
+
+
 def test_ambiguous_historical_match_is_not_attributed_to_either_company(httpx_mock, build_pdf_bytes, tmp_path):
     """Two SPK records share the same ticker (a genuinely ambiguous
     situation) — halka_arz_advisor.kap.matching.match_disclosure already

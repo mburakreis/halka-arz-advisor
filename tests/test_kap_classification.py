@@ -1,4 +1,4 @@
-from halka_arz_advisor.kap.classification import classify_title, target_document_types
+from halka_arz_advisor.kap.classification import classify_prospectus_document_role, classify_title, target_document_types
 
 
 def test_izahname_classifies_as_approved_prospectus():
@@ -63,6 +63,68 @@ def test_classification_is_robust_to_turkish_characters():
     # Same phrase, ASCII-only spelling (no Turkish diacritics) — must still match.
     assert classify_title("Halka Arz Sonuclari") == "ipo_results"
     assert classify_title("Islem Gormeye Baslama") == "trading_start"
+
+
+def test_prospectus_role_recognizes_base_document_and_its_parts_and_revisions():
+    """Real summaries confirmed live (2026-08-07) across several tickers'
+    approved_prospectus disclosures — the base document itself, split
+    across several filings and/or wholly reposted as a correction."""
+    assert classify_prospectus_document_role("ŞA-RA Enerji İnşaat Ticaret ve Sanayi A.Ş. İzahname") == "base_document"
+    assert classify_prospectus_document_role("ŞA-RA Enerji İnşaat Ticaret ve Sanayi A.Ş. İzahname - Düzeltme") == "base_document"
+    assert classify_prospectus_document_role("Albayrak Hazır Beton A.Ş. İzahname - 1. Bölüm") == "base_document"
+    assert classify_prospectus_document_role("Albayrak Hazır Beton A.Ş.- İzahname") == "base_document"
+    assert (
+        classify_prospectus_document_role("Golda Gıda Sanayi ve Ticaret A.Ş.'nin SPK tarafından onaylanan izahnamesinin 1. kısmı")
+        == "base_document"
+    )
+    assert classify_prospectus_document_role("Masfen Enerji Anonim Şirketi Paylarının Halka Arzına İlişkin SPK Onaylı İzahname-2") == "base_document"
+    assert (
+        classify_prospectus_document_role(
+            "Masfen Enerji A.Ş. onaylı halka arz izahnamesinin sehven eksik yayımlanan 412. Sayfası ve "
+            "tek metin haline getirilmiş onaylı izahname 1"
+        )
+        == "base_document"
+    )
+    assert classify_prospectus_document_role("Quick Sigorta A.Ş. Paylarının Halka Arzına İlişkin İzahname") == "base_document"
+
+
+def test_prospectus_role_recognizes_exhibits_as_attachments_not_the_base_document():
+    """Same real-ticker evidence: valuation/audit/legal/charter/fund-use
+    reports and appendix bundles filed under the identical KAP
+    'approved_prospectus' classification, distinguishable only by
+    summary text — never by title, which KAP files identically."""
+    assert classify_prospectus_document_role("EK_1 Şirket Esas Sözleşme") == "attachment"
+    assert classify_prospectus_document_role("Ekinciler Demir ve Çelik Sanayi AŞ Halka Arzına İlişkin Onaylı İzahname Ek-1") == "attachment"
+    assert (
+        classify_prospectus_document_role("Golda Gıda Sanayi ve Ticaret A.Ş.'nin SPK onaylı İzahnamesi ekleri 1. Bölüm")
+        == "attachment"
+    )
+    assert classify_prospectus_document_role("Albayrak Hazır Beton A.Ş.Izahname ekleri") == "attachment"
+    assert (
+        classify_prospectus_document_role(
+            "ŞA-RA Enerji İnşaat Ticaret ve Sanayi A.Ş. Paylarının Halka Arzına İlişkin İzahname EK-7 Fiyat Tespit Raporu 31.03"
+        )
+        == "attachment"
+    )
+    assert classify_prospectus_document_role("Masfen Enerji Anonim Şirketi Paylarının Halka Arzına İlişkin Esas Sözleşme") == "attachment"
+    assert (
+        classify_prospectus_document_role("Quick Sigorta A.Ş. Paylarının Halka Arzına İlişkin Gayrimenkul Değerleme Raporları") == "attachment"
+    )
+    assert classify_prospectus_document_role("Quick Sigorta A.Ş. Paylarının Halka Arzına İlişkin Bağımsız Denetim Sorumluluk Beyanları") == "attachment"
+    # No "izahname" mention at all — never the base document, no keyword needed.
+    assert classify_prospectus_document_role("ŞA-RA Enerji İnşaat Ticaret ve Sanayi A.Ş. GK İç Yönergesi TTSG") == "attachment"
+
+
+def test_prospectus_role_ek_marker_does_not_false_positive_on_eksik():
+    """'eksik' (missing/incomplete) starts with the same three letters as
+    the 'Ek-N' appendix marker but is unrelated — must not misclassify a
+    genuine base-document correction notice as an exhibit."""
+    assert (
+        classify_prospectus_document_role(
+            "Masfen Enerji A.Ş. onaylı halka arz izahnamesinin sehven eksik yayımlanan 412. Sayfası"
+        )
+        == "base_document"
+    )
 
 
 def test_target_document_types_excludes_other():

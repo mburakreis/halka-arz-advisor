@@ -40,7 +40,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from halka_arz_advisor.decision.pipeline import compute_decision_results  # noqa: E402
+from halka_arz_advisor.decision.pipeline import compute_decision_results, resolve_company_identity  # noqa: E402
 from halka_arz_advisor.gemini.analysis import analyze_company, verify_gemini_ready  # noqa: E402
 from halka_arz_advisor.gemini.cache import AnalysisCache  # noqa: E402
 from halka_arz_advisor.gemini.client import GeminiClient  # noqa: E402
@@ -52,7 +52,6 @@ from halka_arz_advisor.kap.client import KapClient  # noqa: E402
 from halka_arz_advisor.kap.documents import (  # noqa: E402
     DEFAULT_CACHE_DIR,
     aggregate_company_facts,
-    infer_company_name_and_ticker,
     process_disclosure_documents,
 )
 from halka_arz_advisor.kap.exceptions import KapApiError  # noqa: E402
@@ -224,7 +223,9 @@ def main(argv: list[str] | None = None) -> int:
     for record_id in analyzable_record_ids:
         facts = company_facts[record_id]
         disclosures_for_company = disclosures_by_record.get(record_id, [])
-        company_name, ticker = infer_company_name_and_ticker(record_id, disclosures_for_company)
+        company_name, ticker = resolve_company_identity(
+            record_id, disclosures_for_company, ipo_records=ipo_records, application_records=application_records
+        )
         print(f"Analyzing {record_id} ({company_name})...", file=sys.stderr)
         try:
             record = analyze_company(

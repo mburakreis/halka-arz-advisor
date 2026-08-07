@@ -25,7 +25,11 @@ from dataclasses import dataclass
 
 from .exceptions import GeminiOutputError
 
-SCHEMA_VERSION = "2"
+# Bumped alongside halka_arz_advisor.gemini.grounding's addition — the
+# cache key (see halka_arz_advisor.gemini.cache) folds this in, so the
+# bump alone invalidates every analysis cached before grounding
+# validation existed, without a separate migration step.
+SCHEMA_VERSION = "3"
 
 ANALYSIS_JSON_SCHEMA: dict = {
     "type": "object",

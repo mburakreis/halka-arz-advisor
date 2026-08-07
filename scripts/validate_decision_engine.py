@@ -35,10 +35,10 @@ from halka_arz_advisor.decision.engine import (  # noqa: E402
     top_positive_contributions,
     unavailable_high_weight_features,
 )
-from halka_arz_advisor.decision.pipeline import compute_decision_results  # noqa: E402
+from halka_arz_advisor.decision.pipeline import compute_decision_results, resolve_company_identity  # noqa: E402
 from halka_arz_advisor.kap.classification import target_document_types  # noqa: E402
 from halka_arz_advisor.kap.client import KapClient  # noqa: E402
-from halka_arz_advisor.kap.documents import DEFAULT_CACHE_DIR, infer_company_name_and_ticker, process_disclosure_documents  # noqa: E402
+from halka_arz_advisor.kap.documents import DEFAULT_CACHE_DIR, process_disclosure_documents  # noqa: E402
 from halka_arz_advisor.kap.exceptions import KapApiError  # noqa: E402
 from halka_arz_advisor.kap.matching import match_disclosure  # noqa: E402
 from halka_arz_advisor.kap.models import KapDisclosure  # noqa: E402
@@ -137,7 +137,9 @@ def main(argv: list[str] | None = None) -> int:
     companies_output = []
     for record_id, result in sorted(decision_results.items()):
         disclosures_for_company = disclosures_by_record.get(record_id, [])
-        company_name, ticker = infer_company_name_and_ticker(record_id, disclosures_for_company)
+        company_name, ticker = resolve_company_identity(
+            record_id, disclosures_for_company, ipo_records=ipo_records, application_records=application_records
+        )
 
         max_coverage = max((c.coverage for c in result.category_scores), default=0.0)
         if max_coverage < args.min_coverage:

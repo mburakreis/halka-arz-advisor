@@ -31,12 +31,13 @@ import argparse
 import os
 import sys
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from halka_arz_advisor.decision.pipeline import compute_decision_results  # noqa: E402
+from halka_arz_advisor.decision.pipeline import compute_decision_results, resolve_company_identity  # noqa: E402
 from halka_arz_advisor.gemini.cache import AnalysisCache  # noqa: E402
 from halka_arz_advisor.gemini.config import DEFAULT_MODEL  # noqa: E402
 from halka_arz_advisor.gemini.prompt import PROMPT_VERSION  # noqa: E402
@@ -45,7 +46,6 @@ from halka_arz_advisor.kap.client import KapClient  # noqa: E402
 from halka_arz_advisor.kap.documents import (  # noqa: E402
     DEFAULT_CACHE_DIR,
     aggregate_company_facts,
-    infer_company_name_and_ticker,
     process_disclosure_documents,
 )
 from halka_arz_advisor.kap.exceptions import KapApiError  # noqa: E402
@@ -197,7 +197,7 @@ def main(argv: list[str] | None = None) -> int:
         model=model,
         prompt_version=PROMPT_VERSION,
         state=state,
-        infer_company_name_and_ticker=infer_company_name_and_ticker,
+        infer_company_name_and_ticker=partial(resolve_company_identity, ipo_records=ipo_records, application_records=application_records),
         sender=_sender,
         ocr_cache=ocr_cache,
     )

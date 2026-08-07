@@ -129,7 +129,11 @@ def test_real_shaped_pipeline_from_kap_data_through_decision_engine_to_telegram_
         "offering_summary": "Halka arz özeti.",
         "use_of_proceeds_summary": "Fon kullanım özeti.",
         "key_risks": ["Risk 1"],
-        "positive_factors": ["Olumlu 1"],
+        # Left empty: halka_arz_advisor.gemini.grounding requires every
+        # positive_factors/negative_factors item to be traceable to the
+        # deterministic decision_result's own precomputed contributions,
+        # and this fixture doesn't try to model that precisely.
+        "positive_factors": [],
         "negative_factors": [],
         "missing_information": [],
         "data_conflicts": [],

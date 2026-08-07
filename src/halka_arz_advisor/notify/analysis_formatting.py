@@ -23,7 +23,7 @@ the primary source themselves.
 
 from __future__ import annotations
 
-from ..decision.engine import top_negative_contributions, top_positive_contributions
+from ..decision.engine import displayable_category_score, top_negative_contributions, top_positive_contributions
 from ..decision.explain import format_explanation
 from ..gemini.models import AnalysisRecord
 from ..kap.extraction import ExtractedFacts
@@ -118,14 +118,20 @@ def format_analysis_notification(
 
     if decision is not None:
         signal_label = _SIGNAL_LABELS_TR.get(decision.signal, decision.signal)
-        total_str = f"{decision.total_score:.0f}" if decision.total_score is not None else "yok"
-        lines.append(f"Karar desteği: {signal_label}  (skor: {total_str}/100, güven: %{decision.confidence_score:.0f})")
+        # A category below its mandatory coverage threshold can still
+        # carry a thin partial average internally (see
+        # halka_arz_advisor.decision.engine.compute_total_score) — never
+        # shown here as a valid directional score, since that's exactly
+        # what forces insufficient_data in the first place.
+        score_part = f"skor: {decision.total_score:.0f}/100" if decision.total_score is not None else "skor: yetersiz veri"
+        lines.append(f"Karar desteği: {signal_label}  ({score_part}, güven: %{decision.confidence_score:.0f})")
         lines.append("")
         lines.append("Kategori skorları:")
         for category in decision.category_scores:
             label = _CATEGORY_LABELS_TR.get(category.category, category.category)
-            score_str = f"{category.score:.0f}" if category.score is not None else "yok"
-            lines.append(f"  • {label}: {score_str}/100 (kapsam %{category.coverage * 100:.0f})")
+            display_score = displayable_category_score(category)
+            score_str = f"{display_score:.0f}/100" if display_score is not None else "yok"
+            lines.append(f"  • {label}: {score_str} (kapsam %{category.coverage * 100:.0f})")
     else:
         lines.append("Karar desteği: Yetersiz veri")
 

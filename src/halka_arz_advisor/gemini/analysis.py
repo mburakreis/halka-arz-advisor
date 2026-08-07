@@ -35,6 +35,7 @@ from .cache import AnalysisCache, compute_cache_key
 from .client import GeminiClient
 from .context import DEFAULT_MAX_TOTAL_CHARS, ContextSection, select_context_sections
 from .exceptions import GeminiOutputError
+from .grounding import validate_grounding
 from .models import AnalysisRecord
 from .prompt import PROMPT_VERSION, allowed_source_references, build_prompt
 from .schema import ANALYSIS_JSON_SCHEMA, SCHEMA_VERSION, validate_analysis_output
@@ -217,7 +218,12 @@ def analyze_company(
         raw_response_text = gemini_client.generate(prompt, format_schema=ANALYSIS_JSON_SCHEMA)
         try:
             parsed = json.loads(raw_response_text)
-            output = validate_analysis_output(parsed, allowed_references=allowed_refs)
+            candidate = validate_analysis_output(parsed, allowed_references=allowed_refs)
+            # Only assign to `output` once grounding also passes — a
+            # shape-valid but ungrounded candidate from a failed final
+            # attempt must never survive the loop as if it were usable.
+            validate_grounding(candidate, decision_result)
+            output = candidate
             break
         except (json.JSONDecodeError, GeminiOutputError) as exc:
             warnings.append(f"attempt {attempt}: {exc}")

@@ -1,7 +1,7 @@
 from datetime import date, datetime
 
 from halka_arz_advisor.decision.audit import CompanyDecisionInputs
-from halka_arz_advisor.decision.engine import evaluate_decision, score_category
+from halka_arz_advisor.decision.engine import displayable_category_score, evaluate_decision, score_category
 from halka_arz_advisor.decision.scoring_config import get_scoring_config
 from halka_arz_advisor.decision.snapshot import build_decision_snapshot
 from halka_arz_advisor.kap.extraction import FieldObservation, SourceRef as FactSourceRef, build_extracted_facts
@@ -125,6 +125,25 @@ def test_no_data_is_insufficient_data():
     assert "insufficient_mandatory_category_coverage" in triggered
 
 
+def test_missing_mandatory_documents_names_real_document_types():
+    """The hard rule must point a user at an actual document type they
+    could go look for (e.g. "approved_prospectus") — never a
+    decision-catalog feature_id like "document_completeness", which is
+    an internal derived/coverage concept, not a document."""
+    inputs = CompanyDecisionInputs(
+        spk_record_id=RECORD_ID, spk_record=None, application_record=None, facts=None, disclosures=(), financial_observations=()
+    )
+    snapshot = build_decision_snapshot(inputs, reference_date=datetime(2026, 1, 10))
+    result = evaluate_decision(snapshot)
+
+    rule = next(r for r in result.hard_rules if r.rule_id == "missing_mandatory_documents")
+    assert rule.triggered
+    assert "approved_prospectus" in rule.reason
+    assert "investor_sale_announcement" in rule.reason
+    assert "document_completeness" not in rule.reason
+    assert "financial_statement_summary" not in rule.reason
+
+
 def test_unresolved_conflict_forces_insufficient_data():
     # Prospectus and announcement disagree on the offering price — a
     # conflict on a critical field must never be silently picked
@@ -189,3 +208,75 @@ def test_missing_features_reduce_coverage_without_a_neutral_score():
     assert result.score == 100.0
     included = {c.feature_id for c in result.contributions if c.included_in_score}
     assert included == {"distribution_method"}
+
+
+def test_insufficient_category_score_never_leaks_into_total_score():
+    """A category below its coverage threshold can still carry a real,
+    even perfect, partial average (see test above) — that number must
+    never be presented as (or folded into) a valid overall total_score,
+    since it's exactly what forces insufficient_data in the first place."""
+    prospectus_obs = {
+        "business_description": FieldObservation("bir sirket", "snip", SRC_P),
+        "key_risk_factors": FieldObservation(["risk1"], "snip", SRC_P),
+        "use_of_proceeds_plan": FieldObservation(["buyume"], "snip", SRC_P),
+        "capital_increase_shares": FieldObservation(1000.0, "snip", SRC_P),
+        "secondary_sale_shares": FieldObservation(200.0, "snip", SRC_P),
+        "total_offered_shares": FieldObservation(1200.0, "snip", SRC_P),
+        "capital_increase_ratio": FieldObservation(50.0, "snip", SRC_P),
+        "subscription_start_date": FieldObservation(date(2026, 1, 1), "snip", SRC_P),
+        "subscription_end_date": FieldObservation(date(2026, 1, 3), "snip", SRC_P),
+        "distribution_method": FieldObservation("sabit fiyatla talep toplama", "snip", SRC_P),
+        "offering_price": FieldObservation(10.0, "snip", SRC_P),
+        "currency": FieldObservation("TRY", "snip", SRC_P),
+    }
+    announcement_obs = {
+        "offering_price": FieldObservation(10.0, "snip", SRC_A),
+        "currency": FieldObservation("TRY", "snip", SRC_A),
+    }
+    # Only headline_discount_percentage (weight 40/100) is available for
+    # valuation; earnings_multiple_at_offer/reported_pe_difference_percentage
+    # (weight 60/100 combined) are both missing — 40% coverage, below
+    # the 60% threshold, even though the one available feature scores a
+    # perfect 100.
+    pdr_obs = {"headline_discount_percentage": FieldObservation(30.0, "snip", SRC_PDR)}
+    facts = build_extracted_facts(prospectus_obs, announcement_obs, None, pdr_obs)
+
+    financial_observations = (
+        _financial_obs("revenue", 1000.0, 2023),
+        _financial_obs("revenue", 1300.0, 2024),
+        _financial_obs("net_income", 100.0, 2024),
+        _financial_obs("financial_debt", 400.0, 2024),
+        _financial_obs("cash_and_equivalents", 100.0, 2024),
+        _financial_obs("equity", 1000.0, 2024),
+        _financial_obs("current_assets", 300.0, 2024),
+        _financial_obs("current_liabilities", 150.0, 2024),
+        _financial_obs("operating_cash_flow", 90.0, 2024),
+        _financial_obs("operating_profit", 120.0, 2024),
+        _financial_obs("finance_expense", 20.0, 2024),
+    )
+    disclosures = (
+        _disclosure("d-p", "approved_prospectus", datetime(2026, 1, 1)),
+        _disclosure("d-a", "investor_sale_announcement", datetime(2026, 1, 2)),
+        _disclosure("d-pdr", "price_determination_report", datetime(2026, 1, 3)),
+    )
+
+    inputs = CompanyDecisionInputs(
+        spk_record_id=RECORD_ID,
+        spk_record=None,
+        application_record=None,
+        facts=facts,
+        disclosures=disclosures,
+        financial_observations=financial_observations,
+        company_name="Örnek Enerji A.Ş.",
+    )
+    snapshot = build_decision_snapshot(inputs, reference_date=datetime(2026, 1, 10))
+    result = evaluate_decision(snapshot)
+
+    valuation = result.category_score("valuation")
+    assert valuation.status == "INSUFFICIENT"
+    # Preserved internally for diagnostics...
+    assert valuation.score == 100.0
+    # ...but never shown/used as a valid score.
+    assert displayable_category_score(valuation) is None
+    assert result.total_score is None
+    assert result.signal == "insufficient_data"

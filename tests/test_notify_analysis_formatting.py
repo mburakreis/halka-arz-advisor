@@ -140,6 +140,36 @@ def test_completed_message_contains_all_sections():
     assert "source_references" not in message
 
 
+def test_insufficient_total_score_shows_yetersiz_veri_not_a_number():
+    """A category can carry a real partial score internally even while
+    flagged INSUFFICIENT (see halka_arz_advisor.decision.engine.score_category);
+    neither that per-category number nor a total_score built from it may
+    reach the user as if it were a valid score — see
+    halka_arz_advisor.decision.engine.compute_total_score /
+    displayable_category_score, which this message must respect."""
+    decision = _decision_result(
+        signal="insufficient_data",
+        total_score=None,
+        category_scores=(
+            CategoryScoreResult("fundamental_quality", 70.0, 0.8, "OK", ()),
+            # A perfect partial average, but below the coverage
+            # threshold — must render as "yok", never "100/100".
+            CategoryScoreResult("valuation", 100.0, 0.40, "INSUFFICIENT", ()),
+            CategoryScoreResult("offering_structure", 80.0, 1.0, "OK", ()),
+        ),
+    )
+    record = _completed_record(decision_result=decision)
+
+    message = format_analysis_notification(
+        company_name="X", ticker="X", facts=_facts(), record=record, disclosure_notification_urls={}
+    )
+
+    assert "skor: yetersiz veri" in message
+    assert "100/100" not in message
+    assert "Değerleme: yok (kapsam %40)" in message
+    assert "Temel nitelik: 70/100" in message
+
+
 def test_signal_labels_are_turkish():
     for signal, label in [
         ("participate", "Katıl"),

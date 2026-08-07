@@ -16,11 +16,22 @@ already produced.
 
 from __future__ import annotations
 
-from ..decision.engine import DecisionResult
+from ..decision.catalog import get_feature
+from ..decision.engine import (
+    DecisionResult,
+    displayable_category_score,
+    top_negative_contributions,
+    top_positive_contributions,
+)
 from ..kap.extraction import FIELD_NAMES, ExtractedFacts
 from .context import ContextSection
 
-PROMPT_VERSION = "2"
+# Bumped whenever this module's prompt text changes in a way that could
+# change Gemini's output shape/content for previously-cached inputs
+# (see halka_arz_advisor.gemini.cache's module docstring) — the cache
+# key folds this in, so a bump alone invalidates every stale cached
+# analysis without any separate migration step.
+PROMPT_VERSION = "3"
 
 _SIGNAL_LABELS_TR: dict[str, str] = {
     "participate": "Katıl",
@@ -98,8 +109,21 @@ def _format_sections(sections: list[ContextSection]) -> str:
     return "\n\n".join(blocks)
 
 
+def _feature_label(feature_id: str) -> str:
+    try:
+        return get_feature(feature_id).title
+    except KeyError:
+        return feature_id
+
+
 def _format_decision_result(decision_result: DecisionResult) -> str:
     signal_label = _SIGNAL_LABELS_TR.get(decision_result.signal, decision_result.signal)
+    # A category below its mandatory coverage threshold ("durum:
+    # INSUFFICIENT") never shows a partial numeric score here, even if
+    # one was internally computed — see
+    # halka_arz_advisor.decision.engine.displayable_category_score. The
+    # total score itself is already None in that case (see
+    # halka_arz_advisor.decision.engine.compute_total_score).
     total_str = f"{decision_result.total_score:.1f}" if decision_result.total_score is not None else "yok"
     lines = [
         f"- Sinyal: {signal_label} ({decision_result.signal})",
@@ -108,7 +132,8 @@ def _format_decision_result(decision_result: DecisionResult) -> str:
     ]
     for category in decision_result.category_scores:
         label = _CATEGORY_LABELS_TR.get(category.category, category.category)
-        score_str = f"{category.score:.1f}" if category.score is not None else "yok"
+        display_score = displayable_category_score(category)
+        score_str = f"{display_score:.1f}" if display_score is not None else "yok"
         lines.append(f"- {label} skoru: {score_str} / 100 (kapsam: %{category.coverage * 100:.0f}, durum: {category.status})")
     triggered_rules = [rule for rule in decision_result.hard_rules if rule.triggered]
     if triggered_rules:
@@ -119,6 +144,26 @@ def _format_decision_result(decision_result: DecisionResult) -> str:
         lines.append("- Uyarılar:")
         for warning in decision_result.warnings:
             lines.append(f"  - {warning}")
+
+    positive = top_positive_contributions(decision_result)
+    negative = top_negative_contributions(decision_result)
+    lines.append("")
+    lines.append(
+        "AŞAĞIDAKİ İKİ LİSTE, motorun kendisinin önceden hesapladığı TEK olumlu/olumsuz katkı kaynağıdır — "
+        "'positive_factors' ve 'negative_factors' alanların başka HİÇBİR kaynağı olamaz:"
+    )
+    if positive:
+        lines.append("- Önceden hesaplanmış olumlu katkılar:")
+        for contribution in positive:
+            lines.append(f"  - {_feature_label(contribution.feature_id)} ({contribution.normalized_score:.0f}/100)")
+    else:
+        lines.append("- Önceden hesaplanmış olumlu katkı yok.")
+    if negative:
+        lines.append("- Önceden hesaplanmış olumsuz katkılar:")
+        for contribution in negative:
+            lines.append(f"  - {_feature_label(contribution.feature_id)} ({contribution.normalized_score:.0f}/100)")
+    else:
+        lines.append("- Önceden hesaplanmış olumsuz katkı yok (tetiklenen kesin kurallar hariç).")
     return "\n".join(lines)
 
 
@@ -149,8 +194,11 @@ YER ALMAKTADIR. BU SONUCU DEĞİŞTİRMEK, YENİDEN HESAPLAMAK VEYA FARKLI BİR 
 DEĞERİ ÖNERMEK SENİN GÖREVİN DEĞİLDİR — senin tek görevin bu sonucu Türkçe olarak açıklamaktır:
 {decision_block}
 
-AŞAĞIDA, İLGİLİ BELGELERDEN SEÇİLMİŞ METİN PARÇALARI YER ALMAKTADIR. \
-Analizini YALNIZCA bu metin parçalarına ve yukarıdaki kesin verilere dayandır:
+AŞAĞIDA, İLGİLİ BELGELERDEN SEÇİLMİŞ METİN PARÇALARI YER ALMAKTADIR — YALNIZCA "company_summary", \
+"offering_summary", "use_of_proceeds_summary", "key_risks", "missing_information" ve \
+"data_conflicts" alanları için kullanılabilir. "positive_factors", "negative_factors" ve \
+"decision_explanation" alanları bu metin parçalarına DEĞİL, YALNIZCA yukarıdaki karar motoru \
+sonucuna (sinyal, skorlar, tetiklenen kurallar, uyarılar, önceden hesaplanmış katkılar) dayanmalıdır:
 {sections_block}
 
 KURALLAR (kesinlikle uyulmalıdır):
@@ -169,10 +217,16 @@ bunun yerine "missing_information" alanına ekle.
 — bunları asla değiştirme, yeniden hesaplama veya kendi görüşünle çelişecek şekilde yeniden \
 yorumlama. Hangi verilerin bu sonuca katkıda bulunduğunu ve hangi tetiklenen kuralların/\
 uyarıların önemli olduğunu özetle.
-7. "positive_factors" ve "negative_factors" alanlarında da yukarıdaki karar motoru sonucuyla \
-tutarlı ol — karar motorunun düşük puan verdiği bir kategoriyi olumlu, tetiklenen bir kesin \
-kuralı önemsiz göstermeye çalışma.
-8. Yalnızca istenen şemaya uygun geçerli JSON döndür; şema dışında hiçbir alan ekleme, \
+7. "positive_factors" alanı YALNIZCA yukarıda listelenen "önceden hesaplanmış olumlu katkılar" \
+maddelerinin Türkçe yeniden ifadesinden oluşabilir — her maddede ilgili katkının başlığını \
+(örn. "Sermaye artırım oranı") değiştirmeden kullan. "negative_factors" alanı YALNIZCA önceden \
+hesaplanmış olumsuz katkılardan ve tetiklenen kesin kurallardan oluşabilir. Belge metin \
+parçalarından, kendi genel bilginden veya talep/demand yorumundan YENİ bir olumlu ya da olumsuz \
+faktör TÜRETME veya EKLEME — önceden hesaplanmış listede yoksa, o alana yazma.
+8. "decision_explanation" da dahil olmak üzere hiçbir alanda bir YATIRIM ÖNERİSİ veya TAVSİYESİ \
+verme ("almalısınız", "katılmanızı öneririm" gibi ifadeler YASAKTIR) — sadece yukarıdaki karar \
+motoru sonucunu ve nedenlerini AÇIKLA.
+9. Yalnızca istenen şemaya uygun geçerli JSON döndür; şema dışında hiçbir alan ekleme, \
 açıklama metni ekleme.
 
 Şimdi yukarıdaki bilgilere dayanarak yapılandırılmış analiz JSON'unu üret."""

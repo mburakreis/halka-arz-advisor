@@ -123,16 +123,22 @@ def _facts_not_found():
 
 
 def valid_response_payload(**overrides) -> dict:
+    # positive_factors/negative_factors are left empty and
+    # decision_explanation names the signal by default — matching
+    # _decision_result()'s empty feature_contributions/hard_rules, so
+    # this payload passes halka_arz_advisor.gemini.grounding's grounding
+    # check against the default decision result unless a test overrides
+    # both together.
     payload = {
         "company_summary": "Şirket özeti.",
         "offering_summary": "Halka arz özeti.",
         "use_of_proceeds_summary": "Fon kullanım özeti.",
         "key_risks": ["Risk 1"],
-        "positive_factors": ["Olumlu 1"],
-        "negative_factors": ["Olumsuz 1"],
+        "positive_factors": [],
+        "negative_factors": [],
         "missing_information": [],
         "data_conflicts": [],
-        "decision_explanation": "Karar motoru açıklaması.",
+        "decision_explanation": "Katıl sinyaline ilişkin karar motoru açıklaması.",
         "source_references": [{"disclosure_id": "d1", "page_number": 1}],
     }
     payload.update(overrides)
@@ -190,7 +196,7 @@ def test_valid_response_produces_completed_record(build_pdf_bytes, tmp_path):
     assert record.llm_status == "completed"
     assert record.llm_model == "gemini-3.5-flash"
     assert record.llm_analysis is not None
-    assert record.llm_analysis.decision_explanation == "Karar motoru açıklaması."
+    assert record.llm_analysis.decision_explanation == "Katıl sinyaline ilişkin karar motoru açıklaması."
     assert record.llm_warnings == ()
     # The signal/score/confidence come from the deterministic decision,
     # never from Gemini's own output (which no longer even has them).
@@ -264,6 +270,29 @@ def test_invented_source_reference_is_rejected(build_pdf_bytes, tmp_path):
 
     assert record.llm_status == "invalid_output"
     assert any("not part of the supplied context" in w for w in record.llm_warnings)
+
+
+def test_ungrounded_positive_factor_falls_back_to_invalid_output(build_pdf_bytes, tmp_path):
+    """A positive_factors item that can't be traced to the deterministic
+    result's own precomputed contributions (here: none exist at all,
+    since _decision_result() has empty feature_contributions) must be
+    rejected — after the one retry, the caller ends up with
+    llm_status="invalid_output", never a "completed" record built on an
+    unverified factor (see halka_arz_advisor.gemini.grounding)."""
+    pdf_bytes = build_pdf_bytes(text="Halka arz talep toplama ile ilgili bilgiler bu sayfada yer almaktadir")
+    pdf_cache = PdfCache(tmp_path / "pdfs")
+    pdf_cache.put("obj-1", pdf_bytes)
+    disclosures = [_disclosure(disclosure_id="d1", obj_id="obj-1")]
+
+    ungrounded = json.dumps(valid_response_payload(positive_factors=["Şirketin marka bilinirliği çok yüksek."]))
+    client = make_client(generate_results=[ungrounded, ungrounded])
+    record = analyze_company(
+        **_company_kwargs(disclosures, pdf_cache, AnalysisCache(tmp_path / "analysis"), client)
+    )
+
+    assert record.llm_status == "invalid_output"
+    assert record.llm_analysis is None
+    assert any("not grounded" in w for w in record.llm_warnings)
 
 
 def test_second_run_with_unchanged_inputs_hits_cache(build_pdf_bytes, tmp_path):

@@ -13,9 +13,10 @@ across separate script runs — see
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 
-from ..kap.documents import aggregate_company_facts, aggregate_company_financial_series
+from ..kap.documents import aggregate_company_facts, aggregate_company_financial_series, infer_company_name_and_ticker
 from ..kap.models import KapDisclosure
 from ..spk.application_list import SpkIpoApplicationRecord
 from ..spk.models import SpkIpoRecord
@@ -31,6 +32,56 @@ def _ipo_identity(record: SpkIpoRecord) -> str:
     # precedent already set by scripts/audit_decision_coverage.py.
     company_key = record.borsa_kodu or record.sirket_unvani or "unknown"
     return f"ipo:{company_key}:{record.donem or ''}"
+
+
+def _application_identity(record: SpkIpoApplicationRecord) -> str:
+    # Mirrors halka_arz_advisor.notify.identity.application_identity
+    # exactly — duplicated for the same reason as _ipo_identity above.
+    return f"application:{record.company_name}:{record.application_date.isoformat()}"
+
+
+def resolve_company_identity(
+    record_id: str,
+    disclosures: list[KapDisclosure],
+    *,
+    ipo_records: Sequence[SpkIpoRecord] = (),
+    application_records: Sequence[SpkIpoApplicationRecord] = (),
+) -> tuple[str, str | None]:
+    """The authoritative ``(company_name, ticker)`` pair for one matched
+    company.
+
+    A matched SPK record is always authoritative when one exists — a
+    completed IPO's own ``sirket_unvani``/``borsa_kodu``, or an
+    application's own ``company_name`` — never a KAP disclosure's own
+    ``company_name``, which for several of this project's target
+    document types (price-determination reports, IPO results, trading-
+    start notices) is filed by the lead intermediary brokerage or Borsa
+    İstanbul itself, not the issuer (see
+    :func:`halka_arz_advisor.kap.documents.infer_company_name_and_ticker`'s
+    own docstring). ``record_id`` is expected to be exactly the identity
+    string :func:`halka_arz_advisor.kap.matching.match_disclosure`
+    already assigned as ``matched_spk_record_id`` — either
+    :func:`_ipo_identity` or :func:`_application_identity` — so this
+    performs the same lookup, not a fresh name-based guess.
+
+    Falls back to :func:`~halka_arz_advisor.kap.documents.infer_company_name_and_ticker`'s
+    disclosure-only heuristic only when ``record_id`` matches neither
+    pool — a genuinely pre-application company that still has real KAP
+    data worth scoring (see :func:`compute_decision_results`).
+    """
+    ipo_by_identity = {_ipo_identity(record): record for record in ipo_records}
+    spk_record = ipo_by_identity.get(record_id)
+    if spk_record is not None and spk_record.sirket_unvani:
+        ticker = spk_record.borsa_kodu or next((d.ticker for d in disclosures if d.ticker), None)
+        return spk_record.sirket_unvani, ticker
+
+    application_by_identity = {_application_identity(record): record for record in application_records}
+    application_record = application_by_identity.get(record_id)
+    if application_record is not None:
+        ticker = next((d.ticker for d in disclosures if d.ticker), None)
+        return application_record.company_name, ticker
+
+    return infer_company_name_and_ticker(record_id, disclosures)
 
 
 def _find_application_record(
@@ -73,6 +124,9 @@ def compute_decision_results(
 
     results: dict[str, DecisionResult] = {}
     for record_id, disclosures_for_company in disclosures_by_record.items():
+        company_name, _ticker = resolve_company_identity(
+            record_id, disclosures_for_company, ipo_records=ipo_records, application_records=application_records
+        )
         inputs = CompanyDecisionInputs(
             spk_record_id=record_id,
             spk_record=ipo_by_identity.get(record_id),
@@ -80,6 +134,7 @@ def compute_decision_results(
             facts=company_facts.get(record_id),
             disclosures=tuple(disclosures_for_company),
             financial_observations=company_financials.get(record_id, ()),
+            company_name=company_name,
         )
         snapshot = build_decision_snapshot(inputs, reference_date=reference_date)
         results[record_id] = evaluate_decision(snapshot)

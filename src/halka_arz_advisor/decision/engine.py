@@ -192,7 +192,22 @@ def compute_total_score(config: ScoringConfig, category_results: tuple[CategoryS
     """Weighted average of the 3 category scores using their
     ``expert_v0`` weights (50/30/20) — re-normalized among whichever
     categories actually have a score, never treating a scoreless
-    category as a zero."""
+    category as a zero.
+
+    Returns ``None`` — not a number computed from whatever thin data is
+    available — the moment *any* of the 3 categories is ``INSUFFICIENT``
+    (below its coverage threshold; see :func:`score_category`). A
+    category below threshold can still carry a numeric ``.score`` (a
+    real average of the handful of features that *were* available), and
+    that per-category number stays on :class:`CategoryScoreResult` for
+    diagnostics — but folding it into an overall total would present a
+    thin, coverage-flagged category as if it were a normal contributor,
+    which is exactly what already forces ``insufficient_data`` via the
+    ``insufficient_mandatory_category_coverage`` hard rule. The total
+    must not contradict that signal by still reporting e.g. "100/100".
+    """
+    if any(c.status == "INSUFFICIENT" for c in category_results):
+        return None
     weights = {
         "fundamental_quality": config.fundamental_quality.weight,
         "valuation": config.valuation.weight,
@@ -203,6 +218,17 @@ def compute_total_score(config: ScoringConfig, category_results: tuple[CategoryS
         return None
     weight_sum = sum(w for w, _ in available)
     return sum(w * s for w, s in available) / weight_sum
+
+
+def displayable_category_score(category: CategoryScoreResult) -> float | None:
+    """``category.score`` for display purposes only — every renderer
+    (Telegram, the deterministic explainer, the Gemini prompt) must call
+    this rather than reading ``category.score`` directly, since a
+    category below its coverage threshold can still carry a real
+    partial average (see :func:`score_category`) that would otherwise
+    be shown as if it were a normal, trustworthy score. ``None`` here
+    means "show as unavailable", never "silently show the thin number"."""
+    return category.score if category.status == "OK" else None
 
 
 # --------------------------------------------------------------------------
@@ -391,13 +417,20 @@ def evaluate_hard_rules(
         for r in snapshot.audit_results
         if (spec := get_feature(r.feature_id)).is_mandatory and spec.offer_timing == "pre_offer" and r.status == "MISSING_DOCUMENT"
     ]
+    # Report the actual required document/source types (e.g.
+    # "approved_prospectus", "price_determination_report") a user could
+    # go look for — never the catalog feature_id itself (e.g.
+    # "document_completeness", "financial_statement_summary"), which is
+    # an internal decision-catalog concept, not a document. A feature's
+    # own acceptable_sources already names exactly what document type(s)
+    # would have supplied it (see catalog.py's module docstring).
+    missing_document_types = sorted({source for r in missing_mandatory for source in get_feature(r.feature_id).acceptable_sources})
     missing_mandatory_rule = HardRuleResult(
         "missing_mandatory_documents",
         "insufficient_data",
         bool(missing_mandatory),
-        f"{len(missing_mandatory)} mandatory pre-offer feature(s) have no readable source document: "
-        + ", ".join(r.feature_id for r in missing_mandatory)
-        if missing_mandatory
+        f"missing required source document(s): {', '.join(missing_document_types)}"
+        if missing_document_types
         else "every mandatory pre-offer feature has a readable source document",
     )
 

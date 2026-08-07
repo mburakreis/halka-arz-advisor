@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 
+from ..evds.models import MarketContextSnapshot
 from ..kap.documents import aggregate_company_facts, aggregate_company_financial_series, infer_company_name_and_ticker
 from ..kap.extraction import apply_lower_authority_fallback
 from ..kap.models import KapDisclosure
@@ -101,6 +102,7 @@ def compute_decision_results(
     ipo_records: tuple[SpkIpoRecord, ...] = (),
     application_records: tuple[SpkIpoApplicationRecord, ...] = (),
     supplementary_disclosures: Sequence[KapDisclosure] = (),
+    market_context: MarketContextSnapshot | None = None,
     reference_date: datetime | None = None,
 ) -> dict[str, DecisionResult]:
     """One :class:`~halka_arz_advisor.decision.engine.DecisionResult` per
@@ -124,6 +126,17 @@ def compute_decision_results(
     still gets a result. They otherwise participate fully — coverage/
     hard-rule document-presence checks, financial observations — exactly
     like a KAP disclosure would.
+
+    ``market_context`` (see
+    :func:`halka_arz_advisor.evds.features.build_market_context_snapshot`)
+    is company-agnostic — the identical snapshot is attached to every
+    result this call produces, never fetched per company. ``None`` (the
+    default) reproduces this function's exact pre-EVDS behavior: every
+    ``market_context`` catalog feature resolves ``MISSING_DOCUMENT``,
+    same as always. Nothing about ``total_score``/``confidence_score``/
+    ``signal`` reads this — ``market_context`` isn't one of
+    ``expert_v0``'s three scored categories — so passing a snapshot only
+    ever changes coverage-audit output, never a participation signal.
     """
     company_facts = aggregate_company_facts(processed_disclosures)
     company_financials = aggregate_company_financial_series(processed_disclosures)
@@ -164,6 +177,7 @@ def compute_decision_results(
             disclosures=combined_disclosures,
             financial_observations=financial_observations,
             company_name=company_name,
+            market_context=market_context,
         )
         snapshot = build_decision_snapshot(inputs, reference_date=reference_date)
         results[record_id] = evaluate_decision(snapshot)

@@ -35,6 +35,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from halka_arz_advisor.decision import CATEGORIES, FEATURE_CATALOG, audit_company  # noqa: E402
 from halka_arz_advisor.decision.audit import CompanyDecisionInputs  # noqa: E402
+from halka_arz_advisor.evds import EvdsCache, build_market_context_snapshot  # noqa: E402
 from halka_arz_advisor.kap.classification import target_document_types  # noqa: E402
 from halka_arz_advisor.kap.client import KapClient  # noqa: E402
 from halka_arz_advisor.kap.documents import DEFAULT_CACHE_DIR, aggregate_company_facts, process_disclosure_documents  # noqa: E402
@@ -73,6 +74,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ticker", type=str, default=None, help="Only audit this ticker (case-insensitive)")
     parser.add_argument("--pdf-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_CACHE_DIR)
     parser.add_argument("--ocr-cache-dir", type=Path, default=PROJECT_ROOT / DEFAULT_OCR_CACHE_DIR)
+    parser.add_argument("--evds-cache-dir", type=Path, default=PROJECT_ROOT / "data" / "cache" / "evds")
     parser.add_argument("--env-file", type=Path, default=PROJECT_ROOT / ".env")
     return parser.parse_args(argv)
 
@@ -173,6 +175,20 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"{len(record_ids)} compan(y/ies) to audit against {len(FEATURE_CATALOG)} catalog feature(s)", file=sys.stderr)
 
+    # Cache-only, network-free — reads whatever scripts/refresh_evds_market_context.py
+    # already cached (see halka_arz_advisor.evds). Company-agnostic: the
+    # same snapshot is attached to every company below. No refresh is
+    # attempted here even if EVDS_API_KEY is set; a missing/empty cache
+    # just means every market_context.* feature below stays MISSING_DOCUMENT,
+    # same as before this existed.
+    evds_cache = EvdsCache(args.evds_cache_dir)
+    market_context = build_market_context_snapshot(
+        bist100_index=evds_cache.get_observations("bist100_index"),
+        policy_rate_observations=evds_cache.get_observations("policy_rate"),
+        tlref_observations=evds_cache.get_observations("tlref_rate"),
+        cpi_observations=evds_cache.get_observations("cpi_index"),
+    )
+
     aggregate_summary: dict[str, int] = {status: 0 for status in ALL_STATUSES}
     companies_output = []
 
@@ -188,6 +204,7 @@ def main(argv: list[str] | None = None) -> int:
             application_record=application_record,
             facts=facts,
             disclosures=disclosures_for_company,
+            market_context=market_context,
         )
         results = audit_company(inputs)
 

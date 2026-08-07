@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Literal
 
+from ..evds.models import MarketContextSnapshot
 from ..kap.derived_financials import DERIVED_FINANCIAL_FEATURE_NAMES, compute_derived_financial_features
 from ..kap.extraction import ExtractedFacts, FIELD_NAMES
 from ..kap.financials import FINANCIAL_METRIC_NAMES, FinancialObservation
@@ -172,6 +173,13 @@ class CompanyDecisionInputs:
     # disclosure's own company_name when not given explicitly — see
     # _fallback_company_name for which one.
     company_name: str | None = None
+    # A company-agnostic macro snapshot (see
+    # halka_arz_advisor.evds.features.build_market_context_snapshot) —
+    # the same snapshot is normally shared across every company audited
+    # in one run, never fetched per-company. None (the default) means
+    # every market_data.* feature below resolves MISSING_DOCUMENT,
+    # exactly as before this field existed.
+    market_context: MarketContextSnapshot | None = None
 
     @property
     def sector(self) -> Sector:
@@ -355,7 +363,27 @@ def _resolve_derived_financial_field(
     )
 
 
-def _resolve_market_data_field(field_ref: str, name: str) -> tuple[FeatureStatus, FeatureEvidence]:
+def _resolve_market_data_field(field_ref: str, name: str, inputs: CompanyDecisionInputs) -> tuple[FeatureStatus, FeatureEvidence]:
+    """Every ``market_data.<name>`` field except the nine EVDS-derived
+    ones (see ``halka_arz_advisor.evds.features``) has no implemented
+    source at all and always resolves ``MISSING_DOCUMENT`` — a genuine,
+    honestly-reported gap (peer comparables, recent-IPO performance),
+    not something this function guesses at. For an EVDS-derived name,
+    resolution depends entirely on whether ``inputs.market_context`` was
+    given a snapshot with that feature computed — a missing snapshot,
+    or a feature EVDS itself didn't have enough cached data to compute
+    yet, both resolve MISSING_DOCUMENT identically; neither is treated
+    as an error.
+    """
+    if inputs.market_context is not None:
+        feature_value = inputs.market_context.get(name)
+        if feature_value is not None:
+            return "AVAILABLE", FeatureEvidence(
+                field_name=field_ref,
+                value=feature_value.value,
+                status="extracted",
+                document_type="evds_market_data_feed",
+            )
     return "MISSING_DOCUMENT", FeatureEvidence(
         field_name=field_ref, value=None, status="no external market-data source is implemented in this project"
     )
@@ -376,7 +404,7 @@ def _resolve_field(field_ref: str, inputs: CompanyDecisionInputs, acceptable_sou
     if namespace == "derived_financial":
         return _resolve_derived_financial_field(field_ref, name, inputs, acceptable_sources)
     if namespace == "market_data":
-        return _resolve_market_data_field(field_ref, name)
+        return _resolve_market_data_field(field_ref, name, inputs)
     raise ValueError(f"unrecognized required_source_fields namespace in {field_ref!r}")
 
 

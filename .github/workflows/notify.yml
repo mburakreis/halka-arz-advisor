@@ -33,26 +33,29 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: uv run python scripts/check_and_notify.py --state-file state/seen_records.json
 
-      # actions/cache's post-job save step needs all five paths to
+      # actions/cache's post-job save step needs all six paths to
       # exist — normally guaranteed by the fetch/backfill/analysis steps
       # below writing at least one file, but not on a run that matches/
       # analyzes nothing (e.g. no KAP disclosures at all in the
       # lookback window).
       - name: Ensure cache directories exist
-        run: mkdir -p data/cache/kap_pdfs data/cache/llm_analysis data/cache/kap_ocr data/cache/kap_backfill data/cache/kap_issuer_ir
+        run: mkdir -p data/cache/kap_pdfs data/cache/llm_analysis data/cache/kap_ocr data/cache/kap_backfill data/cache/kap_issuer_ir data/cache/evds
 
-      # KAP PDFs, Gemini analysis results, OCR text, and the historical-
-      # backfill/issuer-IR search state are pure caches (like the rest of
-      # data/cache/*, gitignored — see .gitignore), not notification
-      # state, so they persist across runs via the Actions cache rather
-      # than being committed to the repo like state/seen_records.json
-      # below. Restored here, saved automatically at the end of the job.
+      # KAP PDFs, Gemini analysis results, OCR text, the historical-
+      # backfill/issuer-IR search state, and the EVDS market-context
+      # cache are pure caches (like the rest of data/cache/*, gitignored
+      # — see .gitignore), not notification state, so they persist
+      # across runs via the Actions cache rather than being committed to
+      # the repo like state/seen_records.json below. Restored here,
+      # saved automatically at the end of the job.
       # data/cache/kap_backfill/data/cache/kap_issuer_ir specifically are
       # what let scripts/backfill_kap_history.py and
       # scripts/ingest_issuer_ir_documents.py below skip an already-
       # exhausted search/crawl on a later scheduled run instead of
-      # repeating it every hour.
-      - name: Restore KAP PDF, Gemini analysis, OCR, backfill, and issuer-IR caches
+      # repeating it every hour; data/cache/evds is what lets
+      # scripts/refresh_evds_market_context.py only ever request the gap
+      # since its own last cached observation.
+      - name: Restore KAP PDF, Gemini analysis, OCR, backfill, issuer-IR, and EVDS caches
         uses: actions/cache@v4
         with:
           path: |
@@ -61,6 +64,7 @@ jobs:
             data/cache/kap_ocr
             data/cache/kap_backfill
             data/cache/kap_issuer_ir
+            data/cache/evds
           key: llm-analysis-cache-${{ github.run_id }}
           restore-keys: |
             llm-analysis-cache-
@@ -102,6 +106,21 @@ jobs:
         # unreachable issuer site must not block analysis/notification.
         continue-on-error: true
         run: uv run python scripts/ingest_issuer_ir_documents.py --ocr-scanned > /dev/null
+
+      - name: Refresh EVDS market-context cache
+        # Fully isolated from the KAP pipeline (halka_arz_advisor.evds) —
+        # BIST 100 level/volume, TCMB's policy rate, BIST TLREF, and
+        # TÜİK's headline CPI, persisted to data/cache/evds/ so a later
+        # run only ever requests the gap. If the EVDS_API_KEY repository
+        # secret isn't configured, the script itself detects that and
+        # skips the refresh cleanly (exit 0) — continue-on-error is a
+        # second layer of protection for a genuine EVDS outage, either
+        # way cached market-context data (if any) remains usable by
+        # scripts/audit_decision_coverage.py.
+        continue-on-error: true
+        env:
+          EVDS_API_KEY: ${{ secrets.EVDS_API_KEY }}
+        run: uv run python scripts/refresh_evds_market_context.py > /dev/null
 
       - name: Run Gemini analysis for pending IPOs
         # A quota/rate-limit/temporary Gemini error must not fail the

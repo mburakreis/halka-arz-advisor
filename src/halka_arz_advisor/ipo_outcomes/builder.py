@@ -27,7 +27,6 @@ from ..probe.config import ProbeConfig
 from ..spk.models import SpkIpoRecord
 from .calculations import (
     RETURN_WINDOWS,
-    bist_relative_first_day,
     bist_relative_return,
     first_day_return,
     n_day_max_drawdown,
@@ -61,21 +60,24 @@ def build_ipo_market_outcome(
     :meth:`halka_arz_advisor.ipo_outcomes.store.IpoMarketOutcomeStore.put`'s
     job) one ticker's outcome.
 
-    If the trading-start date can't be resolved (missing from both
-    sources, or the two sources disagree — see
-    :func:`~halka_arz_advisor.ipo_outcomes.trading_start.resolve_trading_start_date`),
-    every metric field is ``None`` and ``trading_start_conflict``/the
-    raw candidate dates on the result tell the caller why, rather than
-    guessing a date to compute against.
+    Every return/drawdown field is anchored at ``ipo_record``'s own
+    ``halka_arz_fiyati_tl`` — the canonical official offer price this
+    project already surfaces elsewhere (see
+    :mod:`halka_arz_advisor.notify.formatting`) — never a second,
+    independently-derived price. If the trading-start date can't be
+    resolved, or ``ipo_record``/its offer price is missing, every metric
+    field is honestly ``None`` rather than guessed.
     """
     ref = reference_date or datetime.now(UTC).date()
     generated_at = datetime.now(UTC)
     resolution = resolve_trading_start_date(ticker, ipo_record, disclosures)
+    offer_price = ipo_record.halka_arz_fiyati_tl if ipo_record is not None else None
 
     if resolution.resolved_date is None:
         return IpoMarketOutcome(
             ticker=ticker,
             company_name=company_name,
+            offer_price=offer_price,
             resolved_trading_start_date=None,
             spk_trading_start_date=resolution.spk_trading_start_date,
             kap_trading_start_announcement_dates=resolution.kap_trading_start_announcement_dates,
@@ -99,22 +101,23 @@ def build_ipo_market_outcome(
     )
     ordered = sorted(price_observations, key=lambda o: o.trading_date)
 
-    fd = first_day_return(ordered)
-    n5 = n_day_return(ordered, RETURN_WINDOWS["5d"])
-    n20 = n_day_return(ordered, RETURN_WINDOWS["20d"])
-    n3m = n_day_return(ordered, RETURN_WINDOWS["3m"])
-    dd5 = n_day_max_drawdown(ordered, RETURN_WINDOWS["5d"])
-    dd20 = n_day_max_drawdown(ordered, RETURN_WINDOWS["20d"])
-    dd3m = n_day_max_drawdown(ordered, RETURN_WINDOWS["3m"])
+    fd = first_day_return(ordered, offer_price)
+    n5 = n_day_return(ordered, offer_price, RETURN_WINDOWS["5d"])
+    n20 = n_day_return(ordered, offer_price, RETURN_WINDOWS["20d"])
+    n3m = n_day_return(ordered, offer_price, RETURN_WINDOWS["3m"])
+    dd5 = n_day_max_drawdown(ordered, offer_price, RETURN_WINDOWS["5d"])
+    dd20 = n_day_max_drawdown(ordered, offer_price, RETURN_WINDOWS["20d"])
+    dd3m = n_day_max_drawdown(ordered, offer_price, RETURN_WINDOWS["3m"])
 
-    brfd = bist_relative_first_day(fd, bist100_observations, start) if fd is not None else None
-    br5 = bist_relative_return(n5, bist100_observations, start, n5.as_of_date) if n5 is not None else None
-    br20 = bist_relative_return(n20, bist100_observations, start, n20.as_of_date) if n20 is not None else None
-    br3m = bist_relative_return(n3m, bist100_observations, start, n3m.as_of_date) if n3m is not None else None
+    brfd = bist_relative_return(fd, bist100_observations, start)
+    br5 = bist_relative_return(n5, bist100_observations, start)
+    br20 = bist_relative_return(n20, bist100_observations, start)
+    br3m = bist_relative_return(n3m, bist100_observations, start)
 
     return IpoMarketOutcome(
         ticker=ticker,
         company_name=company_name,
+        offer_price=offer_price,
         resolved_trading_start_date=start,
         spk_trading_start_date=resolution.spk_trading_start_date,
         kap_trading_start_announcement_dates=resolution.kap_trading_start_announcement_dates,

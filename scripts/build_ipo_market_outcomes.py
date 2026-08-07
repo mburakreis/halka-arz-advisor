@@ -16,10 +16,13 @@ official Borsa İstanbul daily-bulletin
 price history (halka_arz_advisor.market_prices, cached by calendar date
 so overlapping tickers/re-runs never re-download a bulletin), and
 computes first_day_return / return_5d / return_20d / return_3m /
-max_drawdown_5d / max_drawdown_20d / max_drawdown_3m plus their
-BIST-100-relative counterparts against whatever is already cached in
-data/cache/evds (this command never fetches EVDS itself — see
-scripts/refresh_evds_market_context.py for that).
+max_drawdown_5d / max_drawdown_20d / max_drawdown_3m — each measuring
+the return an investor allotted shares in the IPO actually got, so
+always anchored at the SPK record's own official offer price
+(halka_arz_fiyati_tl), never at the first trading day's own open or
+close — plus their BIST-100-relative counterparts against whatever is
+already cached in data/cache/evds (this command never fetches EVDS
+itself — see scripts/refresh_evds_market_context.py for that).
 
 Writes each result to data/cache/ipo_outcomes/<TICKER>.json and prints a
 JSON summary to stdout. Never touches halka_arz_advisor.decision,

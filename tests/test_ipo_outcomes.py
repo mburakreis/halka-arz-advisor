@@ -4,7 +4,6 @@ import pytest
 
 from halka_arz_advisor.ipo_outcomes.calculations import (
     RETURN_WINDOWS,
-    bist_relative_first_day,
     bist_relative_return,
     first_day_return,
     n_day_max_drawdown,
@@ -84,56 +83,68 @@ def test_resolve_trading_start_date_is_none_without_an_spk_record():
 
 
 # --------------------------------------------------------------------------
-# 2. Outcome math: trading-observation windows, not calendar days
+# 2. Outcome math: anchored at the IPO offer price, trading-observation
+#    windows (never calendar days)
 # --------------------------------------------------------------------------
 
 
-def test_returns_and_drawdowns_are_computed_from_trading_observations_not_calendar_gaps():
-    # A real BIST IPO calendar shape: listing Friday, then trading
-    # resumes Monday (a 3-calendar-day gap) — "5 trading days" must
-    # still mean 5 observations, not 5 calendar days.
+def test_returns_and_drawdowns_are_anchored_at_offer_price_using_trading_observations():
+    # SARAE-shaped: real offer price 70 TL, real 2026-07-17 D1 close 77
+    # TL (-> the real, confirmed +10.0% first_day_return), then a
+    # synthetic D3 pullback (not what SARAE itself did) purely to
+    # exercise the drawdown math, plus a Fri->Mon gap (D1 is a Friday,
+    # D2 resumes the following Monday) to confirm "5 trading sessions"
+    # means 5 observations, not 5 calendar days.
+    offer_price = 70.0
     prices = [
-        _price(date(2026, 7, 17), open=77.0, close=77.0),  # day 0: listing, flat (limit-locked)
-        _price(date(2026, 7, 20), open=84.7, close=84.7),  # day 1 (Monday, after the weekend gap)
-        _price(date(2026, 7, 21), open=93.15, close=93.15),  # day 2
-        _price(date(2026, 7, 22), open=102.4, close=90.0),  # day 3: intraday high then pulls back
-        _price(date(2026, 7, 23), open=90.0, close=95.0),  # day 4
-        _price(date(2026, 7, 24), open=95.0, close=123.8),  # day 5
+        _price(date(2026, 7, 17), open=77.0, close=77.0),  # D1: listing
+        _price(date(2026, 7, 20), open=84.7, close=84.7),  # D2 (Monday, after the weekend gap)
+        _price(date(2026, 7, 21), open=93.15, close=93.15),  # D3
+        _price(date(2026, 7, 22), open=102.4, close=90.0),  # D4: intraday high then pulls back
+        _price(date(2026, 7, 23), open=90.0, close=95.0),  # D5
     ]
 
-    fd = first_day_return(prices)
+    fd = first_day_return(prices, offer_price)
     assert fd is not None
-    assert fd.value == pytest.approx(0.0)
+    assert fd.as_of_date == date(2026, 7, 17)
+    # The real, live-confirmed SARAE number: 77 / 70 - 1 = +10.0%.
+    assert fd.value == pytest.approx(10.0)
 
-    n5 = n_day_return(prices, RETURN_WINDOWS["5d"])
+    n5 = n_day_return(prices, offer_price, RETURN_WINDOWS["5d"])
     assert n5 is not None
-    assert n5.as_of_date == date(2026, 7, 24)
-    assert n5.value == pytest.approx((123.8 / 77.0 - 1.0) * 100.0)
+    assert n5.as_of_date == date(2026, 7, 23)  # D5, the 5th session — not a 6th point past D1
+    assert n5.value == pytest.approx((95.0 / offer_price - 1.0) * 100.0)
 
-    # Not enough observations yet for a 20-observation window.
-    assert n_day_return(prices, RETURN_WINDOWS["20d"]) is None
+    # Only 5 observations exist; a 20-session window needs exactly 20, not 21.
+    assert n_day_return(prices, offer_price, RETURN_WINDOWS["20d"]) is None
 
-    dd5 = n_day_max_drawdown(prices, RETURN_WINDOWS["5d"])
+    dd5 = n_day_max_drawdown(prices, offer_price, RETURN_WINDOWS["5d"])
     assert dd5 is not None
-    # Closing-price peak-to-trough only (mirrors evds.features'
-    # bist100_max_drawdown, which is also close-only): day 2's close
-    # 93.15 is the running peak -> day 3's close 90.0 is the trough,
-    # even though day 3's own intraday high (102.4) was higher still.
+    # Portfolio value series is [offer_price, D1..D5 closes]; D3's close
+    # 93.15 is the running peak -> D4's close 90.0 is the trough (its
+    # own intraday high of 102.4 is irrelevant — closing-price only,
+    # mirroring evds.features.bist100_max_drawdown).
     assert dd5.value == pytest.approx((90.0 / 93.15 - 1.0) * 100.0)
 
     bist_observations = [
-        _bist(date(2026, 7, 16), 10000.0),  # previous trading day's close
-        _bist(date(2026, 7, 17), 10100.0),
-        _bist(date(2026, 7, 24), 10500.0),
+        _bist(date(2026, 7, 16), 10000.0),  # last close before D1 — the one baseline every window uses
+        _bist(date(2026, 7, 17), 10100.0),  # D1's own date
+        _bist(date(2026, 7, 23), 10400.0),  # D5's own date
     ]
-    relative_first_day = bist_relative_first_day(fd, bist_observations, date(2026, 7, 17))
+    relative_first_day = bist_relative_return(fd, bist_observations, date(2026, 7, 17))
     assert relative_first_day is not None
     assert relative_first_day.value == pytest.approx(fd.value - ((10100.0 / 10000.0 - 1.0) * 100.0))
 
-    relative_5d = bist_relative_return(n5, bist_observations, date(2026, 7, 17), n5.as_of_date)
+    relative_5d = bist_relative_return(n5, bist_observations, date(2026, 7, 17))
     assert relative_5d is not None
-    assert relative_5d.value == pytest.approx(n5.value - ((10500.0 / 10100.0 - 1.0) * 100.0))
+    # Same baseline (the pre-D1 close) as first_day's own comparison —
+    # not BIST's close on D1 itself.
+    assert relative_5d.value == pytest.approx(n5.value - ((10400.0 / 10000.0 - 1.0) * 100.0))
 
     # A benchmark date this project hasn't already cached must never be
     # fetched or approximated — just None.
-    assert bist_relative_return(n5, [], date(2026, 7, 17), n5.as_of_date) is None
+    assert bist_relative_return(n5, [], date(2026, 7, 17)) is None
+    # No offer price known (e.g. ipo_record missing) -> honestly None,
+    # never computed against a substitute price.
+    assert first_day_return(prices, None) is None
+    assert n_day_max_drawdown(prices, None, RETURN_WINDOWS["5d"]) is None

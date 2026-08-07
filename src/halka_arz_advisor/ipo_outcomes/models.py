@@ -20,6 +20,12 @@ class IpoMarketOutcome:
     ticker: str
     company_name: str | None
 
+    # The official offer price every return/drawdown field below is
+    # anchored to (halka_arz_advisor.spk.models.SpkIpoRecord.halka_arz_fiyati_tl)
+    # — persisted so a stored outcome is self-explanatory without
+    # re-fetching the SPK record it was built from.
+    offer_price: float | None
+
     # Trading-start resolution (see halka_arz_advisor.ipo_outcomes.trading_start).
     resolved_trading_start_date: date | None
     spk_trading_start_date: date | None
@@ -50,6 +56,7 @@ def outcome_to_dict(outcome: IpoMarketOutcome) -> dict:
     return {
         "ticker": outcome.ticker,
         "company_name": outcome.company_name,
+        "offer_price": outcome.offer_price,
         "resolved_trading_start_date": outcome.resolved_trading_start_date.isoformat()
         if outcome.resolved_trading_start_date
         else None,
@@ -83,6 +90,7 @@ def outcome_from_dict(data: dict) -> IpoMarketOutcome:
     return IpoMarketOutcome(
         ticker=data["ticker"],
         company_name=data.get("company_name"),
+        offer_price=data.get("offer_price"),
         resolved_trading_start_date=_date("resolved_trading_start_date"),
         spk_trading_start_date=_date("spk_trading_start_date"),
         kap_trading_start_announcement_dates=tuple(date.fromisoformat(d) for d in data.get("kap_trading_start_announcement_dates", [])),

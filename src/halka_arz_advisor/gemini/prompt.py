@@ -61,6 +61,8 @@ _FACT_LABELS_TR: dict[str, str] = {
     "pre_offer_capital": "Halka arz öncesi ödenmiş sermaye",
     "post_offer_capital": "Halka arz sonrası ödenmiş sermaye",
     "investor_group_allocations": "Yatırımcı grubu bazında tahsisat",
+    "investor_group_distribution_rules": "Yatırımcı grubu bazında dağıtım yöntemi (eşit/oransal)",
+    "distribution_regulation_reference": "Tahsisata ilişkin tebliğ referansı",
     "use_of_proceeds": "Fon kullanım yeri (izahnameden)",
     "key_risk_items": "Risk faktörleri (izahnameden)",
     "total_participant_count": "Toplam yatırımcı sayısı (halka arz sonuçlarından)",

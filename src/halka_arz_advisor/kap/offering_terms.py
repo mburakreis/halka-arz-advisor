@@ -47,7 +47,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from .extraction import AllocationLineItem, ExtractedFact, ExtractedFacts, FieldObservation, InvestorGroup, merge_field_observations
+from .extraction import (
+    AllocationLineItem,
+    DistributionRuleLineItem,
+    ExtractedFact,
+    ExtractedFacts,
+    FieldObservation,
+    InvestorGroup,
+    merge_field_observations,
+)
 from .models import KapDisclosure
 
 OfferingTermStatus = Literal["extracted", "conflicting", "not_found"]
@@ -102,7 +110,12 @@ class OfferingTerms:
     distribution_method: OfferingTermField
     retail_allocation_percentage: OfferingTermField
     retail_offered_shares: OfferingTermField
+    institutional_allocation_percentage: OfferingTermField
+    institutional_offered_shares: OfferingTermField
     investor_group_allocations: OfferingTermField  # value: tuple[AllocationLineItem, ...] | None
+    retail_distribution_rule: OfferingTermField  # value: "equal" | "proportional" | None
+    investor_group_distribution_rules: OfferingTermField  # value: tuple[DistributionRuleLineItem, ...] | None
+    distribution_regulation_reference: OfferingTermField  # value: str | None, e.g. "II-5.2"
 
 
 OFFERING_TERM_FIELD_NAMES: tuple[str, ...] = (
@@ -119,7 +132,12 @@ OFFERING_TERM_FIELD_NAMES: tuple[str, ...] = (
     "distribution_method",
     "retail_allocation_percentage",
     "retail_offered_shares",
+    "institutional_allocation_percentage",
+    "institutional_offered_shares",
     "investor_group_allocations",
+    "retail_distribution_rule",
+    "investor_group_distribution_rules",
+    "distribution_regulation_reference",
 )
 
 
@@ -233,14 +251,14 @@ def _share_count_field(capital: OfferingTermField, par_value: OfferingTermField,
     return _derive(_divide, "shares", capital, par_value, blocked_notes=f"derived as {label} / par_value_per_share")
 
 
-def _retail_allocation_fields(allocations: OfferingTermField) -> tuple[OfferingTermField, OfferingTermField]:
-    """``retail_allocation_percentage``/``retail_offered_shares`` — read
-    off the ``"retail"``-classified entry of
+def _single_group_allocation_fields(allocations: OfferingTermField, group: InvestorGroup) -> tuple[OfferingTermField, OfferingTermField]:
+    """``<group>_allocation_percentage``/``<group>_offered_shares`` — read
+    off the ``group``-classified entry of
     :data:`~halka_arz_advisor.kap.extraction.investor_group_allocations`
     (never inferred any other way: if the allocation table wasn't found,
-    or was found but states no retail line — a genuinely different
-    distribution structure, not a parsing failure — both fields report
-    accordingly, never guessed)."""
+    or was found but states no line for ``group`` — a genuinely
+    different distribution structure, not a parsing failure — both
+    fields report accordingly, never guessed)."""
     if allocations.status != "extracted":
         pct = OfferingTermField(
             status=allocations.status, value=None, unit="percent", derived=True,
@@ -253,27 +271,97 @@ def _retail_allocation_fields(allocations: OfferingTermField) -> tuple[OfferingT
         return pct, shares
 
     items: tuple[AllocationLineItem, ...] = allocations.value or ()
-    retail = next((item for item in items if item.group == "retail"), None)
-    if retail is None:
-        pct = OfferingTermField(
-            status="not_found", value=None, unit="percent", derived=True,
-            observations=allocations.observations, notes="no retail-classified group line in the allocation table",
-        )
-        shares = OfferingTermField(
-            status="not_found", value=None, unit="shares", derived=True,
-            observations=allocations.observations, notes="no retail-classified group line in the allocation table",
-        )
+    match = next((item for item in items if item.group == group), None)
+    if match is None:
+        note = f"no {group}-classified group line in the allocation table"
+        pct = OfferingTermField(status="not_found", value=None, unit="percent", derived=True, observations=allocations.observations, notes=note)
+        shares = OfferingTermField(status="not_found", value=None, unit="shares", derived=True, observations=allocations.observations, notes=note)
         return pct, shares
 
     pct = OfferingTermField(
-        status="extracted" if retail.percentage is not None else "not_found",
-        value=retail.percentage, unit="percent", derived=True, observations=allocations.observations,
+        status="extracted" if match.percentage is not None else "not_found",
+        value=match.percentage, unit="percent", derived=True, observations=allocations.observations,
     )
     shares = OfferingTermField(
-        status="extracted" if retail.amount_try is not None else "not_found",
-        value=retail.amount_try, unit="shares", derived=True, observations=allocations.observations,
+        status="extracted" if match.amount_try is not None else "not_found",
+        value=match.amount_try, unit="shares", derived=True, observations=allocations.observations,
     )
     return pct, shares
+
+
+_INSTITUTIONAL_GROUPS: tuple[InvestorGroup, ...] = ("domestic_institutional", "foreign_institutional")
+
+
+def _institutional_allocation_fields(allocations: OfferingTermField) -> tuple[OfferingTermField, OfferingTermField]:
+    """``institutional_allocation_percentage``/``institutional_offered_shares``
+    — plain arithmetic sum of the ``domestic_institutional`` and
+    ``foreign_institutional`` lines of
+    :data:`~halka_arz_advisor.kap.extraction.investor_group_allocations`
+    (both are, by SPK's own tahsisat vocabulary, institutional investor
+    groups — the same "sum of already-verified real values" spirit as
+    ``gross_offer_size``, not an invented category). Only summed when
+    *every* matched institutional line itself has a value for the
+    measure being summed — a document stating one institutional group's
+    percentage but not the other's would make a partial sum misleading,
+    so that reports ``not_found`` rather than a silently-incomplete
+    total."""
+    if allocations.status != "extracted":
+        pct = OfferingTermField(
+            status=allocations.status, value=None, unit="percent", derived=True,
+            observations=allocations.observations, notes="derived from investor_group_allocations",
+        )
+        shares = OfferingTermField(
+            status=allocations.status, value=None, unit="shares", derived=True,
+            observations=allocations.observations, notes="derived from investor_group_allocations",
+        )
+        return pct, shares
+
+    items: tuple[AllocationLineItem, ...] = allocations.value or ()
+    matches = [item for item in items if item.group in _INSTITUTIONAL_GROUPS]
+    if not matches:
+        note = "no domestic_institutional/foreign_institutional group line in the allocation table"
+        pct = OfferingTermField(status="not_found", value=None, unit="percent", derived=True, observations=allocations.observations, notes=note)
+        shares = OfferingTermField(status="not_found", value=None, unit="shares", derived=True, observations=allocations.observations, notes=note)
+        return pct, shares
+
+    pct_values = [m.percentage for m in matches]
+    share_values = [m.amount_try for m in matches]
+    if all(v is not None for v in pct_values):
+        pct = OfferingTermField(status="extracted", value=sum(pct_values), unit="percent", derived=True, observations=allocations.observations)
+    else:
+        pct = OfferingTermField(
+            status="not_found", value=None, unit="percent", derived=True, observations=allocations.observations,
+            notes="one or more institutional group lines is missing a percentage",
+        )
+    if all(v is not None for v in share_values):
+        shares = OfferingTermField(status="extracted", value=sum(share_values), unit="shares", derived=True, observations=allocations.observations)
+    else:
+        shares = OfferingTermField(
+            status="not_found", value=None, unit="shares", derived=True, observations=allocations.observations,
+            notes="one or more institutional group lines is missing a share amount",
+        )
+    return pct, shares
+
+
+def _retail_distribution_rule_field(rules: OfferingTermField) -> OfferingTermField:
+    """``retail_distribution_rule`` — read off the ``"retail"``-classified
+    entry of
+    :data:`~halka_arz_advisor.kap.extraction.investor_group_distribution_rules`
+    (never inferred any other way)."""
+    if rules.status != "extracted":
+        return OfferingTermField(
+            status=rules.status, value=None, unit=None, derived=True,
+            observations=rules.observations, notes="derived from investor_group_distribution_rules",
+        )
+
+    items: tuple[DistributionRuleLineItem, ...] = rules.value or ()
+    match = next((item for item in items if item.group == "retail"), None)
+    if match is None:
+        return OfferingTermField(
+            status="not_found", value=None, unit=None, derived=True, observations=rules.observations,
+            notes="no retail-classified group line in the distribution-rule table",
+        )
+    return OfferingTermField(status="extracted", value=match.method, unit=None, derived=True, observations=rules.observations)
 
 
 def build_offering_terms(facts: ExtractedFacts | None, disclosures: Sequence[KapDisclosure] = ()) -> OfferingTerms:
@@ -308,6 +396,12 @@ def build_offering_terms(facts: ExtractedFacts | None, disclosures: Sequence[Kap
     pre_offer_capital = _passthrough(facts.pre_offer_capital, "pre_offer_capital", "TRY", disclosures_by_id)
     post_offer_capital = _passthrough(facts.post_offer_capital, "post_offer_capital", "TRY", disclosures_by_id)
     investor_group_allocations = _passthrough(facts.investor_group_allocations, "investor_group_allocations", None, disclosures_by_id)
+    investor_group_distribution_rules = _passthrough(
+        facts.investor_group_distribution_rules, "investor_group_distribution_rules", None, disclosures_by_id
+    )
+    distribution_regulation_reference = _passthrough(
+        facts.distribution_regulation_reference, "distribution_regulation_reference", None, disclosures_by_id
+    )
 
     secondary_sale_shares = _secondary_sale_field(facts, disclosures_by_id, total_offered_shares, new_issue_shares)
 
@@ -329,7 +423,9 @@ def build_offering_terms(facts: ExtractedFacts | None, disclosures: Sequence[Kap
         blocked_notes="derived as offer_price * post_offer_share_count",
     )
 
-    retail_allocation_percentage, retail_offered_shares = _retail_allocation_fields(investor_group_allocations)
+    retail_allocation_percentage, retail_offered_shares = _single_group_allocation_fields(investor_group_allocations, "retail")
+    institutional_allocation_percentage, institutional_offered_shares = _institutional_allocation_fields(investor_group_allocations)
+    retail_distribution_rule = _retail_distribution_rule_field(investor_group_distribution_rules)
 
     return OfferingTerms(
         offer_price=offer_price,
@@ -345,7 +441,12 @@ def build_offering_terms(facts: ExtractedFacts | None, disclosures: Sequence[Kap
         distribution_method=distribution_method,
         retail_allocation_percentage=retail_allocation_percentage,
         retail_offered_shares=retail_offered_shares,
+        institutional_allocation_percentage=institutional_allocation_percentage,
+        institutional_offered_shares=institutional_offered_shares,
         investor_group_allocations=investor_group_allocations,
+        retail_distribution_rule=retail_distribution_rule,
+        investor_group_distribution_rules=investor_group_distribution_rules,
+        distribution_regulation_reference=distribution_regulation_reference,
     )
 
 
@@ -383,6 +484,12 @@ def _json_safe(value: object) -> object:
             "group_label_raw": value.group_label_raw,
             "amount_try": value.amount_try,
             "percentage": value.percentage,
+        }
+    if isinstance(value, DistributionRuleLineItem):
+        return {
+            "group": value.group,
+            "group_label_raw": value.group_label_raw,
+            "method": value.method,
         }
     if isinstance(value, (tuple, list)):
         return [_json_safe(v) for v in value]

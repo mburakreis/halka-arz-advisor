@@ -55,6 +55,8 @@ FIELD_NAMES: tuple[str, ...] = (
     "pre_offer_capital",
     "post_offer_capital",
     "investor_group_allocations",
+    "investor_group_distribution_rules",
+    "distribution_regulation_reference",
     "use_of_proceeds",
     "key_risk_items",
     # Post-offer fields, sourced from the IPO results disclosure
@@ -705,6 +707,78 @@ def extract_investor_group_allocations(text: str) -> list[tuple[AllocationLineIt
     return items or None
 
 
+# "Yurt İçi Bireysel Yatırımcılara Dağıtım: Eşit Dağıtım Yöntemine göre
+# yapılacaktır." / "Grup Çalışanları'na Dağıtım:  Eşit Dağıtım
+# Yöntemine göre yapılacaktır." / "Yüksek Talepte Bulunacak Yatırımcı
+# Grubu(na) Dağıtım:  Oransal Dağıtım Yöntemine göre yapılacaktır." —
+# confirmed live on 2026-08-08 against real İzahname text (EKDMR's own
+# base document, plus two further large base İzahname documents cached
+# this session): each investor group's own within-tranche distribution
+# rule is stated as a "<GROUP> Dağıtım: <Yöntem> Dağıtım Yöntemine göre
+# yapılacaktır." sentence, immediately below the same §25.2.3 tahsisat
+# section :data:`_ALLOCATION_LINE_RE` reads — "Eşit Dağıtım" (equal:
+# split evenly per investor, used for the retail/"Grup Çalışanları"
+# tranches in every sample) or "Oransal Dağıtım" (pro-rata by requested
+# amount, used for the "Yüksek Talepte Bulunacak Yatırımcı Grubu"
+# tranche in every sample). The institutional tranches use neither
+# word — their real wording is a negotiated/discretionary process
+# ("Her bir Yurt İçi Kurumsal Yatırımcıya verilecek pay miktarına ...
+# ile görüşülerek belirlenecektir") in free narrative text, not this
+# fixed sentence shape — deliberately not matched here, never
+# force-classified as equal or proportional.
+_DISTRIBUTION_RULE_LINE_RE = _re(r"([^:\n]{4,70}?)\s*dagitim\s*:\s*(esit|oransal)\s+dagitim\s+yontemine")
+
+DistributionRuleMethod = Literal["equal", "proportional"]
+_DISTRIBUTION_RULE_METHOD_MAP: dict[str, DistributionRuleMethod] = {"esit": "equal", "oransal": "proportional"}
+
+
+@dataclass(frozen=True, slots=True)
+class DistributionRuleLineItem:
+    """One investor group's own within-tranche distribution rule (see
+    :data:`_DISTRIBUTION_RULE_LINE_RE`) — ``group`` reuses the same
+    closed-vocabulary classification :class:`AllocationLineItem` uses,
+    never invented for an unrecognized label."""
+
+    group: InvestorGroup
+    group_label_raw: str
+    method: DistributionRuleMethod
+
+
+def extract_investor_group_distribution_rules(text: str) -> list[tuple[DistributionRuleLineItem, str]] | None:
+    """Every ``"<GROUP> Dağıtım: <Eşit|Oransal> Dağıtım Yöntemine göre
+    yapılacaktır"`` sentence found (see :data:`_DISTRIBUTION_RULE_LINE_RE`'s
+    docstring) — every group stated in the document is kept, not just
+    the first."""
+    folded = fold_turkish(text)
+    items: list[tuple[DistributionRuleLineItem, str]] = []
+    for match in _DISTRIBUTION_RULE_LINE_RE.finditer(folded):
+        label_raw = text[match.start(1) : match.end(1)].strip(" -•\t")
+        group = _classify_investor_group(fold_turkish(label_raw))
+        method = _DISTRIBUTION_RULE_METHOD_MAP[match.group(2)]
+        snippet = text[match.start() : match.end()]
+        items.append((DistributionRuleLineItem(group=group, group_label_raw=label_raw, method=method), snippet))
+        if len(items) >= 10:
+            break
+    return items or None
+
+
+# "II-5.2 sayılı Sermaye Piyasası Araçlarının Satışı Tebliği'nin
+# 18'inci maddesinin dördüncü fıkrası hükmü uyarınca ..." — confirmed
+# live on 2026-08-08 against three real İzahname's own §25.2.3(a)
+# "Yatırımcı grubu bazında tahsisat oranları" section, each citing the
+# exact same communiqué number ("II-5.2") as the regulatory basis for
+# the allocation-group minimums that section states. The communiqué
+# *number* itself is captured generically (not hardcoded as "II-5.2"),
+# in case a future filing cites a different or superseding communiqué
+# — this is a deterministic citation lookup, not a fixed constant.
+_DISTRIBUTION_REGULATION_RE = _re(r"([\w./\-]+)\s+sayili\s+sermaye\s+piyasasi\s+araclarinin\s+satisi\s+tebligi")
+
+
+def extract_distribution_regulation_reference(text: str) -> tuple[str, str] | None:
+    folded = fold_turkish(text)
+    return _search(folded, text, _DISTRIBUTION_REGULATION_RE)
+
+
 def _extract_section_items(
     text: str, headings: tuple[str, ...], *, max_items: int = 5, max_item_length: int = 300
 ) -> list[tuple[str, str]] | None:
@@ -1025,6 +1099,7 @@ _SCALAR_EXTRACTORS: tuple[tuple[str, Callable[[str], tuple[object, str] | None]]
     ("par_value_per_share", extract_par_value_per_share),
     ("pre_offer_capital", extract_pre_offer_capital),
     ("post_offer_capital", extract_post_offer_capital),
+    ("distribution_regulation_reference", extract_distribution_regulation_reference),
     ("total_participant_count", extract_total_participant_count),
     ("retail_participant_count", extract_retail_participant_count),
     ("total_demand_multiple", extract_total_demand_multiple),
@@ -1045,6 +1120,7 @@ _LIST_EXTRACTORS: tuple[tuple[str, Callable[[str], list[tuple[object, str]] | No
     ("use_of_proceeds", extract_use_of_proceeds),
     ("key_risk_items", extract_key_risk_items),
     ("investor_group_allocations", extract_investor_group_allocations),
+    ("investor_group_distribution_rules", extract_investor_group_distribution_rules),
 )
 
 
@@ -1194,6 +1270,8 @@ class ExtractedFacts:
     pre_offer_capital: ExtractedFact
     post_offer_capital: ExtractedFact
     investor_group_allocations: ExtractedFact
+    investor_group_distribution_rules: ExtractedFact
+    distribution_regulation_reference: ExtractedFact
     use_of_proceeds: ExtractedFact
     key_risk_items: ExtractedFact
     total_participant_count: ExtractedFact

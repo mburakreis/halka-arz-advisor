@@ -1,7 +1,9 @@
 from datetime import datetime
 
+from halka_arz_advisor.kap.allocation_scenario import build_allocation_scenario
 from halka_arz_advisor.kap.extraction import (
     AllocationLineItem,
+    DistributionRuleLineItem,
     FieldObservation,
     SourceRef,
     build_extracted_facts,
@@ -277,3 +279,170 @@ def test_retail_fields_not_found_when_allocation_table_itself_not_found():
     assert terms.investor_group_allocations.status == "not_found"
     assert terms.retail_allocation_percentage.status == "not_found"
     assert terms.retail_offered_shares.status == "not_found"
+
+
+def test_institutional_allocation_sums_domestic_and_foreign_lines():
+    allocations = (
+        AllocationLineItem(group="retail", group_label_raw="Yurt İçi Bireysel Yatırımcılara", amount_try=20_800_000.0, percentage=40.0),
+        AllocationLineItem(group="domestic_institutional", group_label_raw="Yurt İçi Kurumsal Yatırımcılara", amount_try=15_600_000.0, percentage=30.0),
+        AllocationLineItem(group="foreign_institutional", group_label_raw="Yurt Dışı Kurumsal Yatırımcılara", amount_try=10_400_000.0, percentage=20.0),
+    )
+    facts = build_extracted_facts(
+        {"investor_group_allocations": FieldObservation(allocations, "tahsisat oranları...", SRC_P)},
+        None,
+    )
+    terms = build_offering_terms(facts, DISCLOSURES)
+
+    assert terms.institutional_allocation_percentage.status == "extracted"
+    assert terms.institutional_allocation_percentage.value == 50.0
+    assert terms.institutional_offered_shares.status == "extracted"
+    assert terms.institutional_offered_shares.value == 26_000_000.0
+
+
+def test_institutional_allocation_not_found_when_neither_institutional_group_present():
+    allocations = (
+        AllocationLineItem(group="retail", group_label_raw="Yurt İçi Bireysel Yatırımcılara", amount_try=20_800_000.0, percentage=40.0),
+    )
+    facts = build_extracted_facts(
+        {"investor_group_allocations": FieldObservation(allocations, "tahsisat oranları...", SRC_P)},
+        None,
+    )
+    terms = build_offering_terms(facts, DISCLOSURES)
+    assert terms.institutional_allocation_percentage.status == "not_found"
+    assert terms.institutional_offered_shares.status == "not_found"
+
+
+def test_institutional_allocation_partial_data_reports_not_found_rather_than_partial_sum():
+    # Foreign-institutional line has no stated percentage — summing just
+    # the domestic figure would silently understate the real total, so
+    # the percentage side reports not_found while the share side (which
+    # both lines do state) still resolves.
+    allocations = (
+        AllocationLineItem(group="domestic_institutional", group_label_raw="Yurt İçi Kurumsal Yatırımcılara", amount_try=15_600_000.0, percentage=30.0),
+        AllocationLineItem(group="foreign_institutional", group_label_raw="Yurt Dışı Kurumsal Yatırımcılara", amount_try=10_400_000.0, percentage=None),
+    )
+    facts = build_extracted_facts(
+        {"investor_group_allocations": FieldObservation(allocations, "tahsisat oranları...", SRC_P)},
+        None,
+    )
+    terms = build_offering_terms(facts, DISCLOSURES)
+    assert terms.institutional_allocation_percentage.status == "not_found"
+    assert terms.institutional_offered_shares.status == "extracted"
+    assert terms.institutional_offered_shares.value == 26_000_000.0
+
+
+def test_retail_distribution_rule_passthrough_from_investor_group_distribution_rules():
+    rules = (
+        DistributionRuleLineItem(group="retail", group_label_raw="Yurt İçi Bireysel Yatırımcılara", method="equal"),
+        DistributionRuleLineItem(group="high_demand", group_label_raw="Yüksek Talepte Bulunacak Yatırımcı Grubuna", method="proportional"),
+    )
+    facts = build_extracted_facts(
+        {"investor_group_distribution_rules": FieldObservation(rules, "Dağıtım Esasları...", SRC_P)},
+        None,
+    )
+    terms = build_offering_terms(facts, DISCLOSURES)
+    assert terms.investor_group_distribution_rules.status == "extracted"
+    assert terms.retail_distribution_rule.status == "extracted"
+    assert terms.retail_distribution_rule.value == "equal"
+
+
+def test_retail_distribution_rule_not_found_when_retail_line_absent():
+    rules = (DistributionRuleLineItem(group="high_demand", group_label_raw="Yüksek Talepte Bulunacak Yatırımcı Grubuna", method="proportional"),)
+    facts = build_extracted_facts(
+        {"investor_group_distribution_rules": FieldObservation(rules, "Dağıtım Esasları...", SRC_P)},
+        None,
+    )
+    terms = build_offering_terms(facts, DISCLOSURES)
+    assert terms.retail_distribution_rule.status == "not_found"
+
+
+def test_distribution_regulation_reference_passthrough():
+    facts = build_extracted_facts(
+        {"distribution_regulation_reference": FieldObservation("II-5.2", "II-5.2 sayılı ... Tebliği", SRC_P)},
+        None,
+    )
+    terms = build_offering_terms(facts, DISCLOSURES)
+    assert terms.distribution_regulation_reference.status == "extracted"
+    assert terms.distribution_regulation_reference.value == "II-5.2"
+
+
+# --------------------------------------------------------------------------
+# AllocationScenario
+# --------------------------------------------------------------------------
+
+
+def _terms_with_equal_retail(retail_shares: float, offer_price: float | None = 45.0):
+    observations = {
+        "investor_group_allocations": FieldObservation(
+            (AllocationLineItem(group="retail", group_label_raw="Yurt İçi Bireysel Yatırımcılara", amount_try=retail_shares, percentage=40.0),),
+            "tahsisat oranları...",
+            SRC_P,
+        ),
+        "investor_group_distribution_rules": FieldObservation(
+            (DistributionRuleLineItem(group="retail", group_label_raw="Yurt İçi Bireysel Yatırımcılara", method="equal"),),
+            "Dağıtım Esasları...",
+            SRC_P,
+        ),
+    }
+    if offer_price is not None:
+        observations["offering_price"] = FieldObservation(offer_price, f"{offer_price} TL fiyattan", SRC_A)
+    facts = build_extracted_facts(observations, None)
+    return build_offering_terms(facts, DISCLOSURES)
+
+
+def test_allocation_scenario_computes_lots_and_tl_for_equal_distribution():
+    terms = _terms_with_equal_retail(retail_shares=1_000_000.0, offer_price=45.0)
+    scenario = build_allocation_scenario(terms, hypothetical_retail_participant_count=100_000)
+
+    assert scenario.status == "computed"
+    assert scenario.lots_per_investor == 10.0
+    assert scenario.tl_allocation_per_investor == 450.0
+    assert scenario.assumptions  # non-empty: equal-distribution/lot-definition/order assumptions stated
+    assert not scenario.caveats
+
+
+def test_allocation_scenario_lots_computed_but_tl_blocked_without_offer_price():
+    terms = _terms_with_equal_retail(retail_shares=1_000_000.0, offer_price=None)
+    scenario = build_allocation_scenario(terms, hypothetical_retail_participant_count=100_000)
+
+    assert scenario.status == "computed"
+    assert scenario.lots_per_investor == 10.0
+    assert scenario.tl_allocation_per_investor is None
+    assert any("offer_price" in c for c in scenario.caveats)
+
+
+def test_allocation_scenario_unavailable_when_distribution_rule_is_proportional():
+    rules = (DistributionRuleLineItem(group="retail", group_label_raw="Yurt İçi Bireysel Yatırımcılara", method="proportional"),)
+    facts = build_extracted_facts(
+        {
+            "investor_group_allocations": FieldObservation(
+                (AllocationLineItem(group="retail", group_label_raw="Yurt İçi Bireysel Yatırımcılara", amount_try=1_000_000.0, percentage=40.0),),
+                "tahsisat oranları...",
+                SRC_P,
+            ),
+            "investor_group_distribution_rules": FieldObservation(rules, "Dağıtım Esasları...", SRC_P),
+        },
+        None,
+    )
+    terms = build_offering_terms(facts, DISCLOSURES)
+    scenario = build_allocation_scenario(terms, hypothetical_retail_participant_count=100_000)
+
+    assert scenario.status == "unavailable"
+    assert scenario.lots_per_investor is None
+    assert any("proportional" in c for c in scenario.caveats)
+
+
+def test_allocation_scenario_unavailable_when_distribution_rule_not_found():
+    terms = build_offering_terms(build_extracted_facts(None, None), DISCLOSURES)
+    scenario = build_allocation_scenario(terms, hypothetical_retail_participant_count=100_000)
+
+    assert scenario.status == "unavailable"
+    assert scenario.lots_per_investor is None
+    assert scenario.caveats
+
+
+def test_allocation_scenario_rejects_nonpositive_participant_count():
+    terms = _terms_with_equal_retail(retail_shares=1_000_000.0)
+    scenario = build_allocation_scenario(terms, hypothetical_retail_participant_count=0)
+    assert scenario.status == "unavailable"
+    assert scenario.caveats

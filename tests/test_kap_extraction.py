@@ -11,7 +11,9 @@ from halka_arz_advisor.kap.extraction import (
     extract_capital_increase_shares,
     extract_currency,
     extract_distribution_method,
+    extract_distribution_regulation_reference,
     extract_investor_group_allocations,
+    extract_investor_group_distribution_rules,
     extract_key_risk_items,
     extract_observations_from_pages,
     extract_offering_price,
@@ -459,6 +461,46 @@ def test_extract_investor_group_allocations_real_shape():
 
 def test_extract_investor_group_allocations_not_found_without_table():
     assert extract_investor_group_allocations("bu belgede tahsisat tablosu yoktur") is None
+
+
+def test_extract_investor_group_distribution_rules_real_shape():
+    # Real shape (paraphrased from a real 2026 İzahname's "Halka Arzda
+    # Dağıtım Esasları" narrative, immediately below the §25.2.3 tahsisat
+    # table): each investor group's own within-tranche distribution rule.
+    text = (
+        "- Yurt İçi Bireysel Yatırımcılara Dağıtım: Eşit Dağıtım Yöntemine göre yapılacaktır. "
+        "Grup Çalışanları'na Dağıtım:  Eşit Dağıtım Yöntemine göre yapılacaktır. "
+        "- Yüksek Talepte Bulunacak Yatırımcı Grubuna Dağıtım:  Oransal Dağıtım Yöntemine göre yapılacaktır. "
+        "Yurt İçi Kurumsal Yatırımcılara Dağıtım: Her bir Yurt İçi Kurumsal Yatırımcıya verilecek pay "
+        "miktarına Tera Yatırım ile görüşülerek karar verilecektir."
+    )
+    items = extract_investor_group_distribution_rules(text)
+    assert items is not None
+    parsed = [(item.group, item.method) for item, _ in items]
+    assert parsed == [("retail", "equal"), ("other", "equal"), ("high_demand", "proportional")]
+
+
+def test_extract_investor_group_distribution_rules_ignores_negotiated_institutional_wording():
+    text = "Yurt İçi Kurumsal Yatırımcılara Dağıtım: Aracı kurum ile görüşülerek belirlenecektir."
+    assert extract_investor_group_distribution_rules(text) is None
+
+
+def test_extract_distribution_regulation_reference_real_shape():
+    # Real shape (paraphrased from three real 2026 İzahname's own §25.2.3(a)
+    # tahsisat section, each citing the same communiqué number).
+    text = (
+        "II-5.2 sayılı Sermaye Piyasası Araçlarının Satışı Tebliği'nin 18'inci maddesinin "
+        "dördüncü fıkrası hükmü uyarınca halka arz edilecek sermaye piyasası araçlarının "
+        "nominal değerinin, en az yüzde onunun yurt içi bireysel yatırımcılara..."
+    )
+    found = extract_distribution_regulation_reference(text)
+    assert found is not None
+    value, snippet = found
+    assert value == "II-5.2"
+
+
+def test_extract_distribution_regulation_reference_not_found():
+    assert extract_distribution_regulation_reference("bu belgede herhangi bir tebliğ ataması yoktur") is None
 
 
 # --------------------------------------------------------------------------

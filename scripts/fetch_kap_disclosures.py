@@ -41,7 +41,7 @@ import argparse
 import json
 import sys
 import time
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -106,6 +106,8 @@ def _matches_ticker_filter(disclosure: KapDisclosure, ticker_filter: str) -> boo
 def _json_default(value: object) -> object:
     if isinstance(value, date):
         return value.isoformat()
+    if is_dataclass(value) and not isinstance(value, type):
+        return asdict(value)
     raise TypeError(f"not JSON serializable: {type(value).__name__}")
 
 

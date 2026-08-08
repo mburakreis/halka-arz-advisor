@@ -11,9 +11,13 @@ from halka_arz_advisor.kap.extraction import (
     extract_capital_increase_shares,
     extract_currency,
     extract_distribution_method,
+    extract_investor_group_allocations,
     extract_key_risk_items,
     extract_observations_from_pages,
     extract_offering_price,
+    extract_par_value_per_share,
+    extract_post_offer_capital,
+    extract_pre_offer_capital,
     extract_reported_ev_ebitda,
     extract_reported_ps,
     extract_retail_allocated_shares,
@@ -156,6 +160,50 @@ def test_extract_offering_price_not_found():
     assert extract_offering_price("bu belgede fiyat bilgisi yoktur") is None
 
 
+def test_extract_offering_price_par_value_sentence_real_shape():
+    # Real shape (paraphrased from four live 2026 investor sale
+    # announcements — ATATR, EMPAE, MEYSU, NETCD): this is where every
+    # one of them actually states the offer price, never the narrative
+    # "belirlenen X TL"/label forms above — the confirmed root cause of
+    # offering_price's near-zero (1/20) real extraction rate.
+    text = "Bir payın nominal değeri 1,00 TL olup, 7,50 TL fiyattan satışa sunulacaktır."
+    value, snippet = extract_offering_price(text)
+    assert value == 7.50
+    assert "7,50" in snippet
+
+
+def test_extract_offering_price_par_value_sentence_no_fiyattan_suffix():
+    # NETCD's real wording has no "fiyattan" at all — "TL'den satışa
+    # sunulacaktır" directly.
+    text = "Bir payın nominal değeri 1 TL olup, 46,00 TL'den satışa sunulacaktır."
+    value, _ = extract_offering_price(text)
+    assert value == 46.00
+
+
+def test_extract_offering_price_par_value_sentence_repeats_par_value_first():
+    # EMPAE's real wording repeats the par value as an adjective clause
+    # between "olup" and the actual price — a gap that merely excludes
+    # digits would stop at that repeated "1" and never reach 22,00.
+    text = "Bir payın nominal değeri 1 TL olup 1 TL nominal değerli paylar, 22,00 TL fiyattan satışa sunulacaktır."
+    value, _ = extract_offering_price(text)
+    assert value == 22.00
+
+
+def test_extract_offering_price_dilution_table_fallback():
+    # The base prospectus's own "Sulanma Etkisi" (dilution effect) table
+    # row — no "TL" unit token nearby, confirmed live against EKDMR's
+    # real İzahname — used only when neither narrative form is found.
+    text = "Sulanma Etkisi Analizi (TL) Halka Arz Öncesi Halka Arz Sonrası\nHalka Arz Fiyatı   45,00\nArtırılan Sermaye   40.000.000"
+    value, _ = extract_offering_price(text)
+    assert value == 45.00
+
+
+def test_extract_par_value_per_share():
+    text = "Bir payın nominal değeri 1,00 TL olup, 7,50 TL fiyattan satışa sunulacaktır."
+    value, snippet = extract_par_value_per_share(text)
+    assert value == 1.0
+
+
 def test_extract_currency_returns_try_when_price_found():
     value, _ = extract_currency("belirlenen 76,60 TL")
     assert value == "TRY"
@@ -184,6 +232,16 @@ def test_extract_distribution_method_fiyat_araligi():
 
 def test_extract_distribution_method_not_found():
     assert extract_distribution_method("belirsiz bir yöntemle satılacaktır") is None
+
+
+def test_extract_distribution_method_sabit_fiyat_ile_variant():
+    # Real shape (paraphrased from EKDMR's actual 2026 İzahname): "Sabit
+    # Fiyat ile Talep Toplama" — a different real spacing/wording from
+    # "Sabit Fiyatla Talep Toplama" above, which this exact phrase does
+    # not match.
+    text = "Halka arz satışı, 'Sabit Fiyat ile Talep Toplama' ve 'En İyi Gayret Aracılığı' yöntemi ile gerçekleştirilecektir."
+    value, _ = extract_distribution_method(text)
+    assert value == "Sabit Fiyat ile Talep Toplama"
 
 
 # --------------------------------------------------------------------------
@@ -231,9 +289,79 @@ def test_extract_capital_increase_ratio_explicit_percentage_wins_over_computed_a
 
 
 def test_extract_secondary_sale_shares():
-    text = "Mevcut ortaklarımızın ortak satışı yoluyla 1.300.000.000 TL nominal değerli paylar halka arz edilecektir."
+    # Real shape (paraphrased from a live 2026 investor sale announcement,
+    # e.g. ATATR/MEYSU): "mevcut ortak(lar)... sahip olduğu"/"...ait",
+    # never the literal "ortak satışı" phrase.
+    text = (
+        "Ortaklığımızın çıkarılmış sermayesinin 100.000.000 TL'den 130.000.000 TL'ye çıkarılması "
+        "nedeniyle artırılacak 30.000.000 TL nominal değerli 30.000.000 adet pay ile mevcut ortak "
+        "Örnek Holding A.Ş.'nin sahip olduğu 20.000.000 TL nominal değerli 20.000.000 adet pay "
+        "olmak üzere toplam 50.000.000 TL nominal değerli 50.000.000 adet payın halka arzına ilişkin duyurudur."
+    )
     value, snippet = extract_secondary_sale_shares(text)
-    assert value == 1300000000.0
+    assert value == 20000000.0
+
+
+def test_extract_secondary_sale_shares_multi_seller_returns_none():
+    # A document naming several individual existing-shareholder sellers
+    # (e.g. real EMPAE/EKDMR announcements) has no single stated total for
+    # the secondary sale — never guessed/summed here; see
+    # kap.offering_terms's total_offered − capital_increase fallback.
+    text = (
+        "Ortaklığımızın çıkarılmış sermayesinin 100.000.000 TL'den 130.000.000 TL'ye çıkarılması "
+        "nedeniyle artırılacak 30.000.000 TL nominal değerli 30.000.000 adet pay, mevcut ortak "
+        "Ada YILMAZ'a ait 12.000.000 TL nominal değerli 12.000.000 adet pay, mevcut ortak Deniz "
+        "KAYA'ya ait 8.000.000 TL nominal değerli 8.000.000 adet pay olmak üzere toplam 50.000.000 "
+        "TL nominal değerli 50.000.000 adet payın halka arzına ilişkin duyurudur."
+    )
+    assert extract_secondary_sale_shares(text) is None
+
+
+def test_extract_capital_increase_shares_aggregated_secondary_sale_parenthetical():
+    # Real shape (paraphrased from UCAYM's actual 2026 announcement): the
+    # secondary sale is aggregated into the same clause via a
+    # parenthetical, so "nominal değerli" no longer immediately follows
+    # the capital-increase amount — _CAPITAL_INCREASE_RE alone would
+    # never match this.
+    text = (
+        "Ortaklığımızın çıkarılmış sermayesinin 175.000.000 TL'den 225.000.000 TL'ye çıkarılması "
+        "nedeniyle artırılacak 50.000.000 TL (ve mevcut ortakların sahip olduğu 10.000.000 TL "
+        "olmak üzere toplam 60.000.000 TL) nominal değerli (B) grubu paylarının halka arzına ilişkin duyurudur."
+    )
+    value, _ = extract_capital_increase_shares(text)
+    assert value == 50000000.0
+
+
+def test_extract_total_offered_shares_tolerates_trailing_parenthesis():
+    # Same UCAYM real shape: "...toplam 60.000.000 TL) nominal değerli"
+    # — a stray ")" between the amount and "nominal değerli".
+    text = (
+        "Ortaklığımızın çıkarılmış sermayesinin 175.000.000 TL'den 225.000.000 TL'ye çıkarılması "
+        "nedeniyle artırılacak 50.000.000 TL (ve mevcut ortakların sahip olduğu 10.000.000 TL "
+        "olmak üzere toplam 60.000.000 TL) nominal değerli (B) grubu paylarının halka arzına ilişkin duyurudur."
+    )
+    value, _ = extract_total_offered_shares(text)
+    assert value == 60000000.0
+
+
+def test_extract_pre_and_post_offer_capital_from_announcement_sentence():
+    text = "Ortaklığımızın çıkarılmış sermayesinin 100.000.000 TL'den 130.000.000 TL'ye çıkarılması nedeniyle artırılacak 30.000.000 TL nominal değerli pay."
+    pre_value, _ = extract_pre_offer_capital(text)
+    post_value, _ = extract_post_offer_capital(text)
+    assert pre_value == 100000000.0
+    assert post_value == 130000000.0
+
+
+def test_extract_pre_and_post_offer_capital_dilution_table_fallback():
+    # The base prospectus's own "Sulanma Etkisi" table restates the same
+    # pre/post paid-in capital pair as "Ödenmiş Sermaye <pre> <post>" —
+    # confirmed live against EKDMR's real İzahname, agreeing exactly
+    # with its own announcement's narrative-sentence reading.
+    text = "Ödenmiş Sermaye 280.000.000 320.000.000"
+    pre_value, _ = extract_pre_offer_capital(text)
+    post_value, _ = extract_post_offer_capital(text)
+    assert pre_value == 280000000.0
+    assert post_value == 320000000.0
 
 
 def test_extract_secondary_sale_ratio():
@@ -251,13 +379,15 @@ def test_extract_total_offered_shares():
 def test_capital_increase_and_secondary_sale_are_extracted_independently():
     """Same document mentioning both must not cross-contaminate values."""
     text = (
-        "Sermaye artırımı yoluyla artırılacak 2.000.000.000 TL nominal değerli paylar ile "
-        "ortak satışı yoluyla 500.000.000 TL nominal değerli paylar birlikte halka arz edilecektir."
+        "Ortaklığımızın çıkarılmış sermayesinin 100.000.000 TL'den 130.000.000 TL'ye çıkarılması "
+        "nedeniyle artırılacak 30.000.000 TL nominal değerli 30.000.000 adet pay ile mevcut ortak "
+        "Örnek Holding A.Ş.'nin sahip olduğu 20.000.000 TL nominal değerli 20.000.000 adet pay "
+        "olmak üzere toplam 50.000.000 TL nominal değerli 50.000.000 adet payın halka arzına ilişkin duyurudur."
     )
     capital_value, _ = extract_capital_increase_shares(text)
     secondary_value, _ = extract_secondary_sale_shares(text)
-    assert capital_value == 2000000000.0
-    assert secondary_value == 500000000.0
+    assert capital_value == 30000000.0
+    assert secondary_value == 20000000.0
 
 
 # --------------------------------------------------------------------------
@@ -294,6 +424,41 @@ def test_extract_use_of_proceeds_not_found_without_heading():
 
 def test_extract_key_risk_items_not_found_without_heading():
     assert extract_key_risk_items("bu belgede ilgili başlık yoktur") is None
+
+
+# --------------------------------------------------------------------------
+# Investor-group tahsisat (allocation) table
+# --------------------------------------------------------------------------
+
+
+def test_extract_investor_group_allocations_real_shape():
+    # Real shape (paraphrased from EKDMR's actual 2026 İzahname §25.2.3(a)
+    # "Yatırımcı grubu bazında tahsisat oranları").
+    text = (
+        "Halka arz edilecek toplam 52.000.000 TL nominal değerli payların; "
+        "20.800.000 TL nominal değerdeki kısmı (40%) Yurt İçi Bireysel Yatırımcılara, "
+        "5.200.000 TL nominal değerdeki kısmı (10%) Yüksek Talepte Bulunacak Yatırımcı Grubu'na, "
+        "15.600.000 TL nominal değerdeki kısmı (30%) Yurt İçi Kurumsal Yatırımcılara, "
+        "10.400.000 TL nominal değerdeki kısmı (20%) Yurt Dışı Kurumsal Yatırımcılara "
+        "gerçekleştirilecek satışlar için tahsis edilmiştir."
+    )
+    items = extract_investor_group_allocations(text)
+    assert items is not None
+    groups = [item.group for item, _ in items]
+    assert groups == ["retail", "high_demand", "domestic_institutional", "foreign_institutional"]
+
+    retail = items[0][0]
+    assert retail.amount_try == 20800000.0
+    assert retail.percentage == 40.0
+
+    total = sum(item.amount_try for item, _ in items)
+    assert total == 52000000.0
+    total_pct = sum(item.percentage for item, _ in items)
+    assert total_pct == 100.0
+
+
+def test_extract_investor_group_allocations_not_found_without_table():
+    assert extract_investor_group_allocations("bu belgede tahsisat tablosu yoktur") is None
 
 
 # --------------------------------------------------------------------------

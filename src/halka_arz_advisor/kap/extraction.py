@@ -51,6 +51,10 @@ FIELD_NAMES: tuple[str, ...] = (
     "total_offered_shares",
     "capital_increase_ratio",
     "secondary_sale_ratio",
+    "par_value_per_share",
+    "pre_offer_capital",
+    "post_offer_capital",
+    "investor_group_allocations",
     "use_of_proceeds",
     "key_risk_items",
     # Post-offer fields, sourced from the IPO results disclosure
@@ -92,6 +96,9 @@ PROSPECTUS_PRIORITY_FIELDS = frozenset(
         "total_offered_shares",
         "capital_increase_ratio",
         "secondary_sale_ratio",
+        "par_value_per_share",
+        "pre_offer_capital",
+        "post_offer_capital",
         "use_of_proceeds",
         "key_risk_items",
     }
@@ -317,19 +324,58 @@ def extract_subscription_end_date_from_result_text(text: str) -> tuple[date, str
     return value, text[match.start() : match.end()]
 
 
+# "Bir payın nominal değeri 1 TL olup, 7,50 TL fiyattan satışa
+# sunulacaktır." / "...1 TL olup 22,00 TL fiyattan satışa sunulacaktır."
+# / "...1 TL olup, 46,00 TL'den satışa sunulacaktır." — confirmed live on
+# 2026-08-08 against four real 2026 investor sale announcements (ATATR,
+# EMPAE, MEYSU, NETCD): this fixed sentence, immediately after the
+# "Halka Arz Süresi" date-range sentence (see
+# _SUBSCRIPTION_DATE_RANGE_TRAILING_RE above), is where every one of them
+# actually states the offer price — never "belirlenen X TL" or a
+# "Halka Arz Fiyatı: X" label, which is why offering_price extracted in
+# only 1/20 companies with a readable base document before this pattern
+# existed (see docs/capability-audit-2026-08-08.md). Tried first, since
+# it's the dominant real shape; group 1 is the per-share nominal (par)
+# value, group 2 is the offer price itself. The gap between "olup" and
+# the price is a lazy, unbounded-character (not digit-excluding) match:
+# EMPAE's real sentence repeats the par value as an adjective clause in
+# between ("...olup 1 TL nominal değerli paylar, 22,00 TL fiyattan
+# satışa sunulacaktır"), so a gap that merely excludes digits would stop
+# at that repeated "1" and never reach the real price. "TL'den satışa"
+# (NETCD) has no "fiyat(tan)" at all, so that whole clause is optional.
+_PRICE_PAR_VALUE_SENTENCE_RE = _re(
+    rf"nominal\s+degeri\s+({_NUM})\s*tl\s+olup[\s\S]{{0,60}}?({_NUM})\s*tl['’]?(?:den|dan|ten|tan)?\s*(?:fiyat(?:tan)?\s+)?satisa\s+sunulacaktir"
+)
 # "Halka arz satış fiyatı olarak belirlenen 76,60 TL" — observed live in a
 # real Fiyat Tespit Raporu.
 _PRICE_NARRATIVE_RE = _re(rf"belirlenen\s+({_NUM})\s*tl")
 # "Halka Arz Fiyatı (TL) : 76,60" / "Halka Arz Fiyatı: 76,60 TL" — a more
 # direct label:value form, tried if the narrative sentence isn't found.
 _PRICE_LABEL_RE = _re(rf"halka\s+arz\s+fiyati\s*\(?\s*tl\s*\)?\s*[:\-]?\s*({_NUM})")
+# "Halka Arz Fiyatı   45,00" — the base prospectus's own "Sulanma Etkisi"
+# (dilution-effect analysis) table row, no "TL" unit token nearby (the
+# unit is only stated once, in the table's own column header) —
+# confirmed live on 2026-08-08 against EKDMR's real, fully digital
+# İzahname (section 29, "SULANMA ETKİSİ"). A distinct, independent
+# source from the announcement's narrative sentence above (same field,
+# cross-checked via the normal conflict-detection merge, never assumed
+# to agree). Tried last since a bare "Halka Arz Fiyatı <number>" with no
+# unit token is a weaker anchor than the two patterns above.
+_PRICE_DILUTION_TABLE_RE = _re(rf"halka\s+arz\s+fiyati\s+({_NUM})(?!\s*%)")
 
 # Controlled vocabulary of SPK-defined IPO distribution methods — checked
-# in this order (first match wins, most-specific first).
+# in this order (first match wins, most-specific first). Each also has an
+# "X ile Y" spacing variant (confirmed live for "sabit fiyat ile talep
+# toplama" — EKDMR's prospectus states it this way twice, e.g. "'Sabit
+# Fiyat ile Talep Toplama' ve 'En İyi Gayret Aracılığı' yöntemi ile
+# gerçekleştirilecektir" — distinct from, and not matched by, "sabit
+# fiyatla talep toplama").
 _DISTRIBUTION_METHODS: tuple[str, ...] = (
     "fiyat araligi ile talep toplama",
     "sabit fiyatla talep toplama",
+    "sabit fiyat ile talep toplama",
     "degisken fiyatla talep toplama",
+    "degisken fiyat ile talep toplama",
     "borsada satis yontemi",
     "borsada satis",
 )
@@ -337,6 +383,20 @@ _DISTRIBUTION_METHODS: tuple[str, ...] = (
 # "artırılacak 2.380.000.000 TL nominal değerli" — the capital-increase
 # nominal amount, observed live in a real prospectus.
 _CAPITAL_INCREASE_RE = _re(rf"artirilacak\s+({_NUM})\s*tl\s+nominal\s+degerli")
+# "...nedeniyle artırılacak 50.000.000 TL (ve mevcut ortakların sahip
+# olduğu 10.000.000 TL olmak üzere toplam 60.000.000 TL) nominal
+# değerli..." — confirmed live on 2026-08-08 against UCAYM's real 2026
+# announcement: when a secondary sale is aggregated into the same
+# clause rather than restated per-component, "nominal değerli" no
+# longer immediately follows the capital-increase amount (a whole
+# parenthetical intervenes), so _CAPITAL_INCREASE_RE above never
+# matches. Anchored on the same "çıkarılması nedeniyle artırılacak"
+# phrase _CAPITAL_AMOUNTS_RE already relies on, this fallback only
+# requires the number to be immediately followed by "TL" — not by
+# "nominal değerli" too — since "nedeniyle artırılacak <N> TL" always
+# names the newly issued nominal amount in every real sample checked
+# (EKDMR, ATATR, EMPAE, NETCD, UCAYM, MEYSU).
+_CAPITAL_INCREASE_AFTER_AMOUNTS_RE = _re(rf"cikarilmasi\s+nedeniyle\s+artirilacak\s+({_NUM})\s*tl")
 # "%170 oranında" / "% 25,03" near a capital-increase context.
 _CAPITAL_INCREASE_RATIO_RE = _re(rf"%\s*({_NUM})\s+oraninda[^\n]{{0,60}}artir")
 
@@ -349,17 +409,99 @@ _CAPITAL_INCREASE_RATIO_RE = _re(rf"%\s*({_NUM})\s+oraninda[^\n]{{0,60}}artir")
 # (which requires a stated "% ... oranında") essentially never matches
 # any of them live. Used as a fallback: the ratio is computed from the
 # two stated amounts, (new - old) / old * 100, rather than searched for
-# as an already-stated number.
+# as an already-stated number. Group 1 is the pre-offer capital, group 2
+# the post-offer capital — also reused directly by
+# extract_pre_offer_capital/extract_post_offer_capital below.
 _CAPITAL_AMOUNTS_RE = _re(rf"sermayesinin\s+({_NUM})\s*tl.{{0,3}}den\s+({_NUM})\s*tl.{{0,3}}ye\s+cikarilmasi")
 
-# "ortak satışı yoluyla ... 1.300.000.000 TL" / "ortak satışına konu
-# ... TL nominal değerli" — secondary (existing-shareholder) sale amount.
-_SECONDARY_SALE_RE = _re(rf"ortak\s+satisi[^\n]{{0,60}}?({_NUM})\s*tl")
+# "Ödenmiş Sermaye 280.000.000 320.000.000" — the base prospectus's own
+# "Sulanma Etkisi" table restates the same pre/post paid-in capital pair
+# as a "Halka Arz Öncesi" / "Halka Arz Sonrası" table row (confirmed
+# live against EKDMR's real İzahname, where it agrees exactly with
+# _CAPITAL_AMOUNTS_RE's own reading of the same company's announcement:
+# 280.000.000 -> 320.000.000 both ways) — a second, independent source
+# for the same fact, used as a fallback when the narrative sentence
+# isn't found (e.g. a scanned/OCR'd document where the table survived
+# better than the sentence, or vice versa).
+_ODENMIS_SERMAYE_TABLE_RE = _re(rf"odenmis\s+sermaye\s+({_NUM})\s+({_NUM})")
+
+# "Bir payın nominal değeri 1 TL olup" / "1,00 TL olup" — the per-share
+# par value, stated in the same sentence as the offer price itself (see
+# _PRICE_PAR_VALUE_SENTENCE_RE above); extracted as its own field since
+# converting a nominal-TL capital amount into a share count requires
+# dividing by this value, never assuming it's 1 without checking (every
+# real sample seen states 1 TL, but nothing here hardcodes that).
+_PAR_VALUE_RE = _re(rf"nominal\s+degeri\s+({_NUM})\s*tl\s+olup")
+
+# "mevcut ortak Tan Turizm ...'nin sahip olduğu 40.000.000 TL nominal
+# değerli" (single named seller) / "mevcut ortaklardan Gülsan Gıda
+# ...'ye ait 55.000.000 TL nominal değerli" / "mevcut ortak Vural
+# AKMAN'a ait 3.864.000 TL nominal değerli" (per-seller, EMPAE-style) /
+# "mevcut ortakların sahip olduğu 10.000.000 TL" (aggregated, UCAYM-style)
+# — confirmed live on 2026-08-08 against six real 2026 documents
+# (EKDMR, ATATR, EMPAE, MEYSU, NETCD, UCAYM): every one uses "mevcut
+# ortak(lar)... sahip olduğu"/"...'a/'ya/'ye ait", never the literal
+# phrase "ortak satışı" the previous pattern searched for (which never
+# matched a single one of them) — this is the confirmed root cause of
+# secondary_sale_shares' near-zero extraction rate.
+#
+# A document can restate a *single* named seller (ATATR, MEYSU, UCAYM's
+# aggregate form) — safe to extract directly — or list *several*
+# individually named sellers, each with their own amount (EMPAE: 8
+# sellers, EKDMR: 10) with no single combined figure stated anywhere;
+# summing per-seller matches blindly would risk double-counting (the
+# same paragraph is restated verbatim later on the same page, in every
+# sample seen, as part of the standard "sorumluluk" disclaimer repeat).
+# So the seller pattern is only searched for within the single bounded
+# region between the capital-increase clause and its own closing
+# "...olmak üzere toplam" (never across the whole page) — one seller
+# match there is accepted; zero means no secondary sale in this
+# region (correctly not_found, not a false zero — see
+# kap.offering_terms's total_offered − capital_increase fallback for
+# the genuine no-value case); more than one is a real multi-seller
+# document this function deliberately does not attempt to sum — see
+# build_offering_terms's total_offered − capital_increase derivation
+# (verified live against EMPAE: 9,000,000 = 38,000,000 − 29,000,000,
+# matching the sum of its 8 sellers exactly; and EKDMR: 12,000,000 =
+# 52,000,000 − 40,000,000, matching the sum of its 10 sellers exactly),
+# which needs no seller-level parsing at all.
+_SECONDARY_SALE_REGION_RE = _re(rf"cikarilmasi\s+nedeniyle\s+artirilacak[\s\S]{{0,2000}}?uzere\s+toplam")
+_SECONDARY_SALE_SELLER_RE = _re(rf"mevcut\s+ortak\w*[^\n]{{0,200}}?(?:sahip\s+oldugu|ait)\s+({_NUM})\s*tl")
 _SECONDARY_SALE_RATIO_RE = _re(rf"ortak\s+satisi[^\n]{{0,60}}?%\s*({_NUM})")
 
 # "satışa sunulan toplam ... TL" / "toplam ... TL nominal değerli
-# paylarının halka arzı" — the combined total offered amount.
-_TOTAL_OFFERED_RE = _re(rf"toplam\s+({_NUM})\s*tl\s+nominal\s+degerli")
+# paylarının halka arzı" / "...toplam 60.000.000 TL) nominal değerli"
+# (UCAYM's real wording has a stray ")" between the amount and "nominal
+# değerli" when the secondary sale is aggregated into the same clause —
+# confirmed live 2026-08-08 — hence the optional ``\)?`` below) — the
+# combined total offered amount.
+_TOTAL_OFFERED_RE = _re(rf"toplam\s+({_NUM})\s*tl\)?\s+nominal\s+degerli")
+
+# "Halka arz edilecek toplam 52.000.000 TL nominal değerli payların;
+# • 20.800.000 TL nominal değerdeki kısmı (40%) Yurt İçi Bireysel
+#   Yatırımcılara, • 5.200.000 TL nominal değerdeki kısmı (10%) Yüksek
+#   Talepte Bulunacak Yatırımcı Grubu'na, • 15.600.000 TL nominal
+#   değerdeki kısmı (30%) Yurt İçi Kurumsal Yatırımcılara, • 10.400.000
+#   TL nominal değerdeki kısmı (20%) Yurt Dışı Kurumsal Yatırımcılara
+#   gerçekleştirilecek satışlar için tahsis edilmiştir." — confirmed
+# live on 2026-08-08 against EKDMR's real İzahname, §25.2.3(a)
+# "Yatırımcı grubu bazında tahsisat oranları" (a numbered heading from
+# SPK's own standard İzahname template, not free narrative text — the
+# regulatory citation immediately above it, "II-5.2 sayılı Sermaye
+# Piyasası Araçlarının Satışı Tebliği", confirms this is a fixed,
+# closed vocabulary of investor-group names, not something a per-issuer
+# rule would need to vary). Each bullet is
+# "<AMOUNT> TL nominal değerdeki kısmı (<PCT>%) <GROUP NAME>[suffix],".
+_ALLOCATION_LINE_RE = _re(
+    rf"({_NUM})\s*tl\s+nominal\s+degerdeki\s+kismi\s*\(?\s*({_NUM})\s*%\)?\s+([^,.\n]+?)(?:['’](?:a|e|ya|ye|na|ne)|dan|den)?\s*[,.]"
+)
+_INVESTOR_GROUP_KEYWORDS: tuple[tuple[str, str], ...] = (
+    ("yurt ici bireysel", "retail"),
+    ("bireysel yatirimci", "retail"),
+    ("yuksek talepte bulunacak", "high_demand"),
+    ("yurt ici kurumsal", "domestic_institutional"),
+    ("yurt disi kurumsal", "foreign_institutional"),
+)
 
 _USE_OF_PROCEEDS_HEADINGS: tuple[str, ...] = (
     "halka arzdan elde edilecek fonun kullanimi",
@@ -397,7 +539,22 @@ def extract_subscription_dates(text: str) -> tuple[tuple[date, str] | None, tupl
 
 def extract_offering_price(text: str) -> tuple[float, str] | None:
     folded = fold_turkish(text)
-    found = _search(folded, text, _PRICE_NARRATIVE_RE) or _search(folded, text, _PRICE_LABEL_RE)
+    found = (
+        _search(folded, text, _PRICE_PAR_VALUE_SENTENCE_RE, group=2)
+        or _search(folded, text, _PRICE_NARRATIVE_RE)
+        or _search(folded, text, _PRICE_LABEL_RE)
+        or _search(folded, text, _PRICE_DILUTION_TABLE_RE)
+    )
+    if not found:
+        return None
+    value_text, snippet = found
+    value = parse_turkish_number(value_text)
+    return (value, snippet) if value is not None else None
+
+
+def extract_par_value_per_share(text: str) -> tuple[float, str] | None:
+    folded = fold_turkish(text)
+    found = _search(folded, text, _PAR_VALUE_RE)
     if not found:
         return None
     value_text, snippet = found
@@ -417,7 +574,27 @@ def extract_distribution_method(text: str) -> tuple[str, str] | None:
 
 def extract_capital_increase_shares(text: str) -> tuple[float, str] | None:
     folded = fold_turkish(text)
-    found = _search(folded, text, _CAPITAL_INCREASE_RE)
+    found = _search(folded, text, _CAPITAL_INCREASE_RE) or _search(folded, text, _CAPITAL_INCREASE_AFTER_AMOUNTS_RE)
+    if not found:
+        return None
+    value_text, snippet = found
+    value = parse_turkish_number(value_text)
+    return (value, snippet) if value is not None else None
+
+
+def extract_pre_offer_capital(text: str) -> tuple[float, str] | None:
+    folded = fold_turkish(text)
+    found = _search(folded, text, _CAPITAL_AMOUNTS_RE, group=1) or _search(folded, text, _ODENMIS_SERMAYE_TABLE_RE, group=1)
+    if not found:
+        return None
+    value_text, snippet = found
+    value = parse_turkish_number(value_text)
+    return (value, snippet) if value is not None else None
+
+
+def extract_post_offer_capital(text: str) -> tuple[float, str] | None:
+    folded = fold_turkish(text)
+    found = _search(folded, text, _CAPITAL_AMOUNTS_RE, group=2) or _search(folded, text, _ODENMIS_SERMAYE_TABLE_RE, group=2)
     if not found:
         return None
     value_text, snippet = found
@@ -446,13 +623,22 @@ def extract_capital_increase_ratio(text: str) -> tuple[float, str] | None:
 
 
 def extract_secondary_sale_shares(text: str) -> tuple[float, str] | None:
+    """See :data:`_SECONDARY_SALE_REGION_RE`'s docstring: only extracts
+    when exactly one named/aggregated seller is stated within the
+    capital-increase clause's own region — a real multi-seller document
+    correctly returns ``None`` here rather than a wrong partial sum."""
     folded = fold_turkish(text)
-    found = _search(folded, text, _SECONDARY_SALE_RE)
-    if not found:
+    region_match = _SECONDARY_SALE_REGION_RE.search(folded)
+    if region_match is None:
         return None
-    value_text, snippet = found
-    value = parse_turkish_number(value_text)
-    return (value, snippet) if value is not None else None
+    region_folded = folded[region_match.start() : region_match.end()]
+    region_original = text[region_match.start() : region_match.end()]
+    sellers = list(_SECONDARY_SALE_SELLER_RE.finditer(region_folded))
+    if len(sellers) != 1:
+        return None
+    match = sellers[0]
+    value = parse_turkish_number(region_original[match.start(1) : match.end(1)])
+    return (value, region_original[match.start() : match.end()]) if value is not None else None
 
 
 def extract_secondary_sale_ratio(text: str) -> tuple[float, str] | None:
@@ -473,6 +659,50 @@ def extract_total_offered_shares(text: str) -> tuple[float, str] | None:
     value_text, snippet = found
     value = parse_turkish_number(value_text)
     return (value, snippet) if value is not None else None
+
+
+InvestorGroup = Literal["retail", "high_demand", "domestic_institutional", "foreign_institutional", "other"]
+
+
+@dataclass(frozen=True, slots=True)
+class AllocationLineItem:
+    """One bullet of a prospectus's investor-group tahsisat table (see
+    :data:`_ALLOCATION_LINE_RE`) — ``group`` is this project's own
+    normalized, closed-vocabulary classification of ``group_label_raw``
+    (the verbatim Turkish group name), never invented for a label that
+    doesn't match a known SPK-defined group."""
+
+    group: InvestorGroup
+    group_label_raw: str
+    amount_try: float | None
+    percentage: float | None
+
+
+def _classify_investor_group(folded_label: str) -> InvestorGroup:
+    for keyword, group in _INVESTOR_GROUP_KEYWORDS:
+        if keyword in folded_label:
+            return group  # type: ignore[return-value]
+    return "other"
+
+
+def extract_investor_group_allocations(text: str) -> list[tuple[AllocationLineItem, str]] | None:
+    """Every ``"<AMOUNT> TL nominal değerdeki kısmı (<PCT>%) <GROUP>"``
+    bullet found (see :data:`_ALLOCATION_LINE_RE`'s docstring for the
+    real table shape this matches) — every bullet in the document is
+    kept, not just the first, since the whole point is the full
+    per-group breakdown."""
+    folded = fold_turkish(text)
+    items: list[tuple[AllocationLineItem, str]] = []
+    for match in _ALLOCATION_LINE_RE.finditer(folded):
+        amount = parse_turkish_number(text[match.start(1) : match.end(1)])
+        percentage = parse_turkish_number(text[match.start(2) : match.end(2)])
+        label_raw = text[match.start(3) : match.end(3)].strip()
+        group = _classify_investor_group(fold_turkish(label_raw))
+        snippet = text[match.start() : match.end()]
+        items.append((AllocationLineItem(group=group, group_label_raw=label_raw, amount_try=amount, percentage=percentage), snippet))
+        if len(items) >= 10:
+            break
+    return items or None
 
 
 def _extract_section_items(
@@ -792,6 +1022,9 @@ _SCALAR_EXTRACTORS: tuple[tuple[str, Callable[[str], tuple[object, str] | None]]
     ("total_offered_shares", extract_total_offered_shares),
     ("capital_increase_ratio", extract_capital_increase_ratio),
     ("secondary_sale_ratio", extract_secondary_sale_ratio),
+    ("par_value_per_share", extract_par_value_per_share),
+    ("pre_offer_capital", extract_pre_offer_capital),
+    ("post_offer_capital", extract_post_offer_capital),
     ("total_participant_count", extract_total_participant_count),
     ("retail_participant_count", extract_retail_participant_count),
     ("total_demand_multiple", extract_total_demand_multiple),
@@ -808,9 +1041,10 @@ _SCALAR_EXTRACTORS: tuple[tuple[str, Callable[[str], tuple[object, str] | None]]
     ("headline_discount_percentage", extract_headline_discount_percentage),
 )
 
-_LIST_EXTRACTORS: tuple[tuple[str, Callable[[str], list[tuple[str, str]] | None]], ...] = (
+_LIST_EXTRACTORS: tuple[tuple[str, Callable[[str], list[tuple[object, str]] | None]], ...] = (
     ("use_of_proceeds", extract_use_of_proceeds),
     ("key_risk_items", extract_key_risk_items),
+    ("investor_group_allocations", extract_investor_group_allocations),
 )
 
 
@@ -956,6 +1190,10 @@ class ExtractedFacts:
     total_offered_shares: ExtractedFact
     capital_increase_ratio: ExtractedFact
     secondary_sale_ratio: ExtractedFact
+    par_value_per_share: ExtractedFact
+    pre_offer_capital: ExtractedFact
+    post_offer_capital: ExtractedFact
+    investor_group_allocations: ExtractedFact
     use_of_proceeds: ExtractedFact
     key_risk_items: ExtractedFact
     total_participant_count: ExtractedFact

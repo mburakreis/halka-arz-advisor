@@ -9,6 +9,7 @@ from ``engine``/``scoring_config``/``catalog``/``audit``/``snapshot``/
 :mod:`halka_arz_advisor.kap.manual_confirmation`,
 :mod:`halka_arz_advisor.kap.allocation_scenario`,
 :mod:`halka_arz_advisor.kap.derived_financials`,
+:mod:`halka_arz_advisor.kap.valuation`,
 :mod:`halka_arz_advisor.ipo_outcomes.regime`, and
 :mod:`halka_arz_advisor.evds.models`.
 
@@ -40,11 +41,8 @@ concepts entirely:
 - ``ownership_view`` no longer follows from healthy financial ratios
   alone. :func:`_financial_quality` (``POSITIVE``/``MIXED``/
   ``NEGATIVE``/``UNKNOWN``) is a pure ratio read; ``HOLD_CANDIDATE``
-  additionally requires a resolved valuation anchor (currently: a
-  successfully computed ``recalculated_pe`` — see
-  :mod:`halka_arz_advisor.kap.derived_financials`; no new valuation
-  extractor was added for this). Healthy ratios with no valuation
-  anchor cap ``ownership_view`` at ``WATCH``.
+  additionally requires a resolved valuation anchor. Healthy ratios with
+  no valuation anchor cap ``ownership_view`` at ``WATCH``.
 - ``intended_horizon`` no longer implies a same-day, price-limit-immune
   "listing day flip" — see :data:`_HORIZON_BY_ACTION`.
 - A new ``WATCH_SUBSCRIPTION`` action represents "terms are resolved
@@ -52,6 +50,22 @@ concepts entirely:
   established" — the previous version defaulted this exact case to
   ``SUBSCRIBE_FOR_LISTING_TRADE``, manufacturing a recommendation from
   an absence of evidence.
+
+**r3 (2026-08-08): added a canonical pre-offer valuation-sanity layer**
+(:mod:`halka_arz_advisor.kap.valuation`) — implied post-money market cap
+**at the actual offer price**, plus P/E, P/S, P/B (and, when this
+project ever extracts a depreciation/amortization figure, EV/EBITDA).
+:func:`_valuation_anchor_available` now reads that module's
+``ValuationEvidence.sufficiency`` exclusively — it no longer reads
+:mod:`halka_arz_advisor.kap.derived_financials`'s own ``recalculated_pe``
+(a *different*, still-untouched valuation reading anchored on the price
+determination report's own proposed market cap, not the final offer
+price; the two modules intentionally never share or duplicate a
+calculation). ``valuation_evidence`` is now a normal field on this
+module's result, so a human can see exactly which multiples were
+computed, which weren't and why, and whether the evidence is sufficient
+for a price sanity check — this module never computes or exposes a
+cheap/expensive verdict, and neither does ``kap.valuation``.
 
 **Gates, not points** (unchanged in spirit from r1). Every rule below is
 a pass/fail gate evaluated in a fixed order; nothing here sums or
@@ -75,8 +89,9 @@ from ..kap.manual_confirmation import CompletedOfferingTerms, effective_offering
 from ..kap.models import KapDisclosure
 from ..kap.offering_terms import OfferingTerms
 from ..kap.text import fold_turkish
+from ..kap.valuation import ValuationEvidence
 
-RULE_VERSION = "subscription_v1_r2"
+RULE_VERSION = "subscription_v1_r3"
 
 SubscriptionAction = Literal[
     "SUBSCRIBE_FOR_LISTING_TRADE",
@@ -166,6 +181,10 @@ class SubscriptionDecisionInputs:
     offering_terms: OfferingTerms
     completed_terms: CompletedOfferingTerms
     derived_financials: DerivedFinancialFeatures | None
+    # Canonical valuation evidence (see kap.valuation) — the sole
+    # source _valuation_anchor_available reads; never rebuilt or
+    # duplicated here.
+    valuation_evidence: ValuationEvidence
     market_context: MarketContextSnapshot | None
     as_of: datetime
     ticker: str | None = None
@@ -188,6 +207,7 @@ class SubscriptionDecisionV1:
     financial_quality: FinancialQuality
     ownership_view: OwnershipView
     recent_ipo_regime: RecentIpoRegime
+    valuation_evidence: ValuationEvidence
     allocation_scenarios: tuple[AllocationScenario, ...]
     manually_confirmed_fields: tuple[str, ...]
     strongest_positive_evidence: tuple[str, ...]
@@ -336,16 +356,12 @@ def _financial_quality(derived: DerivedFinancialFeatures | None) -> tuple[Financ
     return "MIXED", tuple(positives), ()
 
 
-def _valuation_anchor_available(derived: DerivedFinancialFeatures | None) -> bool:
-    """Whether *any* existing valuation figure (currently: a
-    successfully computed ``recalculated_pe`` — see
-    ``kap.derived_financials``'s own docstring on why this is so often
-    ``"unavailable"`` today, a real cross-currency extraction gap, not
-    a bug) is resolved. No new valuation extractor is added here —
-    this only checks what's already computed."""
-    if derived is None:
-        return False
-    return derived.recalculated_pe.status == "computed"
+def _valuation_anchor_available(valuation: ValuationEvidence) -> bool:
+    """Reads only ``kap.valuation.ValuationEvidence.sufficiency`` — the
+    canonical valuation evidence — never ``kap.derived_financials``'s
+    own ``recalculated_pe`` (a different anchor; see module docstring)
+    and never recomputes anything itself."""
+    return valuation.sufficiency == "SUFFICIENT"
 
 
 def _ownership_view(financial_quality: FinancialQuality, valuation_anchor_available: bool) -> OwnershipView:
@@ -413,7 +429,7 @@ def evaluate_subscription_decision(inputs: SubscriptionDecisionInputs) -> Subscr
     subscription_edge, edge_reasons = _subscription_edge(regime)
     mechanics_state, mechanics_reasons = _mechanics_state(completed)
     financial_quality, fin_positives, fin_risks = _financial_quality(inputs.derived_financials)
-    valuation_anchor = _valuation_anchor_available(inputs.derived_financials)
+    valuation_anchor = _valuation_anchor_available(inputs.valuation_evidence)
     ownership_view = _ownership_view(financial_quality, valuation_anchor)
 
     subscription_grade = _subscription_evidence_grade(missing, regime)
@@ -463,8 +479,8 @@ def evaluate_subscription_decision(inputs: SubscriptionDecisionInputs) -> Subscr
     reasons.extend(mechanics_reasons)
     if financial_quality == "POSITIVE" and not valuation_anchor:
         reasons.append(
-            "financial ratios are healthy, but no valuation anchor (e.g. a computable recalculated P/E) is "
-            "available from currently resolved pre-offer evidence — ownership capped at WATCH, not HOLD_CANDIDATE"
+            f"financial ratios are healthy, but valuation evidence is insufficient for a price sanity check "
+            f"({inputs.valuation_evidence.sufficiency_reason}) — ownership capped at WATCH, not HOLD_CANDIDATE"
         )
     if not reasons:
         reasons.append("core subscription mechanics resolved with no blockers, but no subscription edge is established")
@@ -491,6 +507,7 @@ def evaluate_subscription_decision(inputs: SubscriptionDecisionInputs) -> Subscr
         financial_quality=financial_quality,
         ownership_view=ownership_view,
         recent_ipo_regime=regime,
+        valuation_evidence=inputs.valuation_evidence,
         allocation_scenarios=scenarios,
         manually_confirmed_fields=manually_confirmed,
         strongest_positive_evidence=strongest_positive,
@@ -503,6 +520,7 @@ def evaluate_subscription_decision(inputs: SubscriptionDecisionInputs) -> Subscr
 
 def subscription_decision_as_dict(decision: SubscriptionDecisionV1) -> dict:
     from ..kap.allocation_scenario import allocation_scenario_as_dict
+    from ..kap.valuation import valuation_evidence_as_dict
 
     return {
         "action": decision.action,
@@ -521,6 +539,7 @@ def subscription_decision_as_dict(decision: SubscriptionDecisionV1) -> dict:
             "window_days": decision.recent_ipo_regime.window_days,
             "included_tickers": list(decision.recent_ipo_regime.included_tickers),
         },
+        "valuation_evidence": valuation_evidence_as_dict(decision.valuation_evidence),
         "allocation_scenarios": [allocation_scenario_as_dict(s) for s in decision.allocation_scenarios],
         "manually_confirmed_fields": list(decision.manually_confirmed_fields),
         "strongest_positive_evidence": list(decision.strongest_positive_evidence),

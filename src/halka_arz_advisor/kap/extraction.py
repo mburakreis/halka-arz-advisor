@@ -427,13 +427,44 @@ _CAPITAL_AMOUNTS_RE = _re(rf"sermayesinin\s+({_NUM})\s*tl.{{0,3}}den\s+({_NUM})\
 # better than the sentence, or vice versa).
 _ODENMIS_SERMAYE_TABLE_RE = _re(rf"odenmis\s+sermaye\s+({_NUM})\s+({_NUM})")
 
-# "Bir payın nominal değeri 1 TL olup" / "1,00 TL olup" — the per-share
-# par value, stated in the same sentence as the offer price itself (see
-# _PRICE_PAR_VALUE_SENTENCE_RE above); extracted as its own field since
-# converting a nominal-TL capital amount into a share count requires
-# dividing by this value, never assuming it's 1 without checking (every
-# real sample seen states 1 TL, but nothing here hardcodes that).
-_PAR_VALUE_RE = _re(rf"nominal\s+degeri\s+({_NUM})\s*tl\s+olup")
+# "Bir payın nominal değeri 1 TL olup" / "beher payın nominal değeri 1
+# TL olup" — the per-share par value, stated in the same sentence as
+# the offer price itself (see _PRICE_PAR_VALUE_SENTENCE_RE above);
+# extracted as its own field since converting a nominal-TL capital
+# amount into a share count requires dividing by this value, never
+# assuming it's 1 without checking (every real sample seen states 1
+# TL, but nothing here hardcodes that).
+#
+# Requires an explicit per-share qualifier ("bir payın"/"beher
+# payın"/"her bir payın"/bare "payın") immediately before "nominal
+# değeri" — confirmed live (2026-08-08) against a real, distinct
+# EKDMR İzahname bug this narrower anchor fixes: a *different*, earlier
+# real sentence in the same document, "Halka arz edilecek payların
+# toplam nominal değeri 52.000.000 TL olup; bu payların 40.000.000 TL
+# nominal değerli kısmı sermaye artırımı suretiyle...", states the
+# *aggregate* nominal value of the whole offered-share block (plural
+# "payların", "toplam" = total) in the exact same "nominal değeri <N>
+# TL olup" shape the old, unanchored pattern accepted — silently
+# overriding the real per-share value (1 TL, from the same document's
+# own "beher payın nominal değeri 1 TL olup" a few pages later) because
+# this field is a PROSPECTUS_PRIORITY_FIELDS entry, so no cross-
+# document conflict with the announcement's correct "1 TL" was ever
+# surfaced either. The resulting ~52,000,000x error propagated into
+# post_offer_share_count/implied_post_money_market_cap (kap.offering_terms)
+# and, from there, into kap.valuation's implied market cap.
+#
+# "olu p" (a stray inserted space before the final letter) tolerated in
+# "olup" — confirmed live in this exact same EKDMR İzahname page (196):
+# "beher payın nominal değeri 1 TL olu p, Şirket'in..." is otherwise the
+# *only* clean per-share-qualified occurrence in the whole 269-page
+# document (the announcement's own clean "Bir payın nominal değeri 1 TL
+# olup" restates the same fact, but EKDMR's investor_sale_announcement
+# happens not to be in this project's currently matched/backfilled
+# disclosure set — a separate, real document-acquisition gap, not an
+# extraction one) — the same category of PDF-glyph-spacing artifact
+# already handled elsewhere in this project (see kap.financials's own
+# "ç"/"ı" glyph-substitution notes).
+_PAR_VALUE_RE = _re(rf"(?:bir|beher|her\s+bir)?\s*payin\s+nominal\s+degeri\s+({_NUM})\s*tl\s+olu\s*p\b")
 
 # "mevcut ortak Tan Turizm ...'nin sahip olduğu 40.000.000 TL nominal
 # değerli" (single named seller) / "mevcut ortaklardan Gülsan Gıda

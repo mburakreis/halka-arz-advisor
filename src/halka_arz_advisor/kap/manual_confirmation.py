@@ -60,6 +60,12 @@ CONFIRMABLE_OFFERING_TERM_FIELDS: tuple[str, ...] = (
     "retail_distribution_rule",
     "distribution_method",
     "total_offered_shares",
+    # Permits completing the valuation anchor directly (e.g. from a
+    # prospectus's own stated post-offer market value) when the
+    # automatic offer_price*post_offer_share_count derivation can't
+    # resolve — see kap.valuation, the sole reader of this field for a
+    # subscription decision.
+    "implied_post_money_market_cap",
 )
 
 _FIELD_UNITS: dict[str, str | None] = {
@@ -71,6 +77,7 @@ _FIELD_UNITS: dict[str, str | None] = {
     "retail_distribution_rule": None,
     "distribution_method": None,
     "total_offered_shares": "shares",
+    "implied_post_money_market_cap": "TRY",
 }
 
 _DISTRIBUTION_RULE_VALUES = frozenset({"equal", "proportional"})
@@ -103,7 +110,8 @@ def _validate_value(field_name: str, value: object) -> None:
         if not isinstance(value, str) or not value.strip():
             raise ManualConfirmationValidationError("distribution_method must be a non-empty string")
         return
-    # offer_price / retail_offered_shares / retail_allocation_percentage / total_offered_shares
+    # offer_price / retail_offered_shares / retail_allocation_percentage /
+    # total_offered_shares / implied_post_money_market_cap
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ManualConfirmationValidationError(f"{field_name!r} must be a number, got {type(value).__name__}")
     if value <= 0:
@@ -151,6 +159,7 @@ class CompletedOfferingTerms:
     retail_distribution_rule: CompletedTermField
     distribution_method: CompletedTermField
     total_offered_shares: CompletedTermField
+    implied_post_money_market_cap: CompletedTermField
 
     def get(self, field_name: str) -> CompletedTermField:
         return getattr(self, field_name)

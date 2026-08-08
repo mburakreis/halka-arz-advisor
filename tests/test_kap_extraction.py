@@ -206,6 +206,36 @@ def test_extract_par_value_per_share():
     assert value == 1.0
 
 
+def test_extract_par_value_per_share_beher_payin_variant():
+    # Confirmed live 2026-08-08 in a real EKDMR İzahname.
+    text = "Halka arz edilmesi planlanan beher payın nominal değeri 1 TL olup, Şirket'in çıkarılmış sermayenin 280.000.000 TL'den 320.000.000 TL'ye artırımı"
+    value, snippet = extract_par_value_per_share(text)
+    assert value == 1.0
+
+
+def test_extract_par_value_per_share_tolerates_a_stray_space_in_olup():
+    # Confirmed live 2026-08-08: a real pypdf text-layer glyph artifact
+    # in this exact EKDMR İzahname page splits "olup" into "olu p".
+    text = "beher payın nominal değeri 1 TL olu p, Şirket'in çıkarılmış sermayenin 280.000.000 TL'den 320.000.000 TL'ye artırımı"
+    value, snippet = extract_par_value_per_share(text)
+    assert value == 1.0
+
+
+def test_extract_par_value_per_share_never_matches_an_aggregate_nominal_value():
+    # Confirmed live 2026-08-08: a real EKDMR İzahname sentence states
+    # the *total* nominal value of the whole offered-share block in the
+    # exact same "nominal değeri <N> TL olup" shape — this must never be
+    # mistaken for the per-share par value (a real, confirmed bug: this
+    # sentence's 52,000,000 was previously picked up as if it were a 1
+    # TL per-share par value, a ~52,000,000x error that propagated into
+    # kap.offering_terms's post_offer_share_count/implied_post_money_market_cap).
+    text = (
+        "Halka arz edilecek payların toplam nominal değeri 52.000.000 TL olup; bu payların 40.000.000 TL "
+        "nominal değerli kısmı sermaye artırımı suretiyle ihraç edilecek"
+    )
+    assert extract_par_value_per_share(text) is None
+
+
 def test_extract_currency_returns_try_when_price_found():
     value, _ = extract_currency("belirlenen 76,60 TL")
     assert value == "TRY"

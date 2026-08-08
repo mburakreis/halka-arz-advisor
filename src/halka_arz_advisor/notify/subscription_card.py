@@ -24,6 +24,7 @@ from ..evds.models import MarketContextSnapshot
 from ..kap.allocation_scenario import AllocationScenario
 from ..kap.manual_confirmation import CompletedOfferingTerms, effective_offering_terms
 from ..kap.offering_terms import OfferingTerms
+from ..kap.valuation import ValuationEvidence, ValuationFeature
 
 MAX_SOURCE_URLS = 3
 MAX_REASON_ITEMS = 3
@@ -153,6 +154,37 @@ def _format_allocation_scenario(scenario: AllocationScenario) -> str:
     return f"  • {count_str} katılımcı varsayımı: {range_str}{tl_str}"
 
 
+def _format_multiple(feature: ValuationFeature, label: str) -> str:
+    if feature.status == "computed":
+        period = f" ({feature.period_end.isoformat()})" if feature.period_end else ""
+        return f"{label}: {feature.value:.1f}x{period}"
+    if feature.status == "not_applicable":
+        return f"{label}: uygulanamaz"
+    return f"{label}: bilinmiyor"
+
+
+def _format_valuation(evidence: ValuationEvidence) -> list[str]:
+    lines = ["", "Değerleme (halka arz fiyatına göre — bir ucuz/pahalı hükmü değildir):"]
+    cap = evidence.implied_market_cap
+    if cap.status == "computed":
+        lines.append(f"  • Halka arz sonrası piyasa değeri: {cap.value:,.0f} TL".replace(",", "."))
+    else:
+        lines.append(f"  • Halka arz sonrası piyasa değeri: bilinmiyor ({cap.unavailable_reason})")
+    lines.append(
+        "  • "
+        + "  |  ".join(
+            (_format_multiple(evidence.pe_at_offer, "F/K"), _format_multiple(evidence.ps_at_offer, "F/S"), _format_multiple(evidence.pb_at_offer, "PD/DD"))
+        )
+    )
+    if evidence.ev_ebitda_at_offer.status != "computed":
+        lines.append(f"  • FD/FAVÖK: bilinmiyor ({evidence.ev_ebitda_at_offer.unavailable_reason})")
+    else:
+        lines.append(_format_multiple(evidence.ev_ebitda_at_offer, "  • FD/FAVÖK"))
+    sufficiency_label = "Yeterli" if evidence.sufficiency == "SUFFICIENT" else "Yetersiz"
+    lines.append(f"  • Fiyat sağlaması için kanıt: {sufficiency_label} — {evidence.sufficiency_reason}")
+    return lines
+
+
 def _format_recent_ipo_regime(decision: SubscriptionDecisionV1) -> list[str]:
     regime = decision.recent_ipo_regime
     lines = ["", "Yakın dönem halka arz rejimi (subscription_edge'in tek kaynağı):"]
@@ -242,6 +274,7 @@ def format_subscription_card(
         for scenario in decision.allocation_scenarios:
             lines.append(_format_allocation_scenario(scenario))
 
+    lines.extend(_format_valuation(decision.valuation_evidence))
     lines.extend(_format_recent_ipo_regime(decision))
 
     if decision.reasons:

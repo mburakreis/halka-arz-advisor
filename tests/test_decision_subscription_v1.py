@@ -6,11 +6,26 @@ from halka_arz_advisor.decision.subscription_v1 import (
 )
 from halka_arz_advisor.ipo_outcomes.models import IpoMarketOutcome
 from halka_arz_advisor.kap.derived_financials import DERIVED_FINANCIAL_FEATURE_NAMES, DerivedFinancialFeature, DerivedFinancialFeatures
+from halka_arz_advisor.kap.extraction import SourceRef
+from halka_arz_advisor.kap.financials import FinancialObservation
 from halka_arz_advisor.kap.manual_confirmation import ManualFieldConfirmation, complete_offering_terms
 from halka_arz_advisor.kap.models import KapDisclosure
 from halka_arz_advisor.kap.offering_terms import OFFERING_TERM_FIELD_NAMES, OfferingTerms, OfferingTermField
+from halka_arz_advisor.kap.valuation import build_valuation_evidence
 
 AS_OF = datetime(2026, 8, 10)
+
+_PDR_SOURCE = SourceRef("price_determination_report", "d-pdr", "url", 5)
+# A real-shaped ANNUAL TRY net_income observation, compatible with
+# _resolved_terms()'s own implied_post_money_market_cap — enough on its
+# own to make build_valuation_evidence report SUFFICIENT (pe_at_offer
+# computed), for tests that need a resolved valuation anchor.
+SUFFICIENT_FINANCIAL_OBSERVATIONS = (
+    FinancialObservation(
+        "net_income", 500_000.0, "TRY", "thousand", date(2024, 1, 1), date(2024, 12, 31), "ANNUAL", "consolidated", None,
+        "x", _PDR_SOURCE,
+    ),
+)
 
 
 def _field(status="not_found", value=None, unit=None):
@@ -39,6 +54,7 @@ def _resolved_terms(**overrides) -> OfferingTerms:
         retail_distribution_rule=_field("extracted", "equal"),
         retail_allocation_percentage=_field("extracted", 40.0, "percent"),
         retail_offered_shares=_field("extracted", 400_000.0, "shares"),
+        implied_post_money_market_cap=_field("extracted", 10_000_000_000.0, "TRY"),
     )
     base.update(overrides)
     return _terms(**base)
@@ -79,13 +95,17 @@ UNFAVORABLE_OUTCOMES = tuple(_outcome(f"U{i}", date(2026, 7, 15), -20.0) for i i
 
 def _inputs(
     terms: OfferingTerms, *, derived=None, market=None, as_of=AS_OF, disclosures=(), confirmations=(),
-    ticker="ORNK", recent_ipo_outcomes=(),
+    ticker="ORNK", recent_ipo_outcomes=(), financial_observations=(),
 ) -> SubscriptionDecisionInputs:
     completed = complete_offering_terms(terms, confirmations)
+    # Built via the real kap.valuation function (not a hand-rolled
+    # stand-in), so these tests also exercise the actual valuation
+    # module end-to-end, not just subscription_v1's own plumbing.
+    valuation = build_valuation_evidence(terms, completed, financial_observations)
     return SubscriptionDecisionInputs(
         offering_terms=terms, completed_terms=completed, derived_financials=derived,
-        market_context=market, as_of=as_of, ticker=ticker, recent_ipo_outcomes=recent_ipo_outcomes,
-        disclosures=disclosures,
+        valuation_evidence=valuation, market_context=market, as_of=as_of, ticker=ticker,
+        recent_ipo_outcomes=recent_ipo_outcomes, disclosures=disclosures,
     )
 
 
@@ -263,7 +283,7 @@ def test_ownership_evidence_grade_reflects_ratios_and_valuation_not_regime():
     result_no_regime = evaluate_subscription_decision(_inputs(terms, derived=healthy_derived, recent_ipo_outcomes=()))
 
     assert result_favorable_regime.ownership_evidence_grade == result_no_regime.ownership_evidence_grade
-    # No valuation anchor available (recalculated_pe not computed) -> MODERATE, not STRONG.
+    # No valuation anchor available (no financial_observations passed) -> MODERATE, not STRONG.
     assert result_no_regime.ownership_evidence_grade == "MODERATE"
 
 
@@ -279,29 +299,33 @@ def test_healthy_ratios_without_a_valuation_anchor_cap_ownership_at_watch():
         revenue_growth_yoy=_derived_feature("revenue_growth_yoy", "computed", 15.0),
         net_margin=_derived_feature("net_margin", "computed", 12.0),
         current_ratio=_derived_feature("current_ratio", "computed", 2.0),
-        # recalculated_pe left "unavailable" — no valuation anchor.
     )
+    # No financial_observations passed -> ValuationEvidence has no
+    # anchor for a P/E, P/S, or P/B multiple.
 
     result = evaluate_subscription_decision(_inputs(terms, derived=healthy_derived))
 
     assert result.financial_quality == "POSITIVE"
     assert result.ownership_view == "WATCH"
     assert result.ownership_view != "HOLD_CANDIDATE"
-    assert any("valuation anchor" in r for r in result.reasons)
+    assert result.valuation_evidence.sufficiency == "INSUFFICIENT"
+    assert any("valuation evidence is insufficient" in r for r in result.reasons)
 
 
 def test_healthy_ratios_with_a_valuation_anchor_reach_hold_candidate():
     terms = _resolved_terms()
-    healthy_with_valuation = _derived(
+    healthy_derived = _derived(
         revenue_growth_yoy=_derived_feature("revenue_growth_yoy", "computed", 15.0),
         net_margin=_derived_feature("net_margin", "computed", 12.0),
         current_ratio=_derived_feature("current_ratio", "computed", 2.0),
-        recalculated_pe=_derived_feature("recalculated_pe", "computed", 8.5),
     )
 
-    result = evaluate_subscription_decision(_inputs(terms, derived=healthy_with_valuation))
+    result = evaluate_subscription_decision(
+        _inputs(terms, derived=healthy_derived, financial_observations=SUFFICIENT_FINANCIAL_OBSERVATIONS)
+    )
 
     assert result.financial_quality == "POSITIVE"
+    assert result.valuation_evidence.sufficiency == "SUFFICIENT"
     assert result.ownership_view == "HOLD_CANDIDATE"
 
 
@@ -311,10 +335,11 @@ def test_single_red_flag_ratio_forces_negative_quality_and_avoid_long_term():
         net_margin=_derived_feature("net_margin", "computed", -5.0),
         revenue_growth_yoy=_derived_feature("revenue_growth_yoy", "computed", 25.0),
         current_ratio=_derived_feature("current_ratio", "computed", 3.0),
-        recalculated_pe=_derived_feature("recalculated_pe", "computed", 8.5),
     )
 
-    result = evaluate_subscription_decision(_inputs(terms, derived=derived, recent_ipo_outcomes=FAVORABLE_OUTCOMES))
+    result = evaluate_subscription_decision(
+        _inputs(terms, derived=derived, recent_ipo_outcomes=FAVORABLE_OUTCOMES, financial_observations=SUFFICIENT_FINANCIAL_OBSERVATIONS)
+    )
 
     assert result.financial_quality == "NEGATIVE"
     assert result.ownership_view == "AVOID_LONG_TERM"
@@ -347,14 +372,15 @@ def test_resolved_terms_and_supportive_mechanics_alone_never_produce_subscribe()
 
 def test_subscribe_with_hold_option_requires_hold_candidate_ownership():
     terms = _resolved_terms()
-    healthy_with_valuation = _derived(
+    healthy_derived = _derived(
         revenue_growth_yoy=_derived_feature("revenue_growth_yoy", "computed", 15.0),
         net_margin=_derived_feature("net_margin", "computed", 12.0),
         current_ratio=_derived_feature("current_ratio", "computed", 2.0),
-        recalculated_pe=_derived_feature("recalculated_pe", "computed", 8.5),
     )
 
-    result = evaluate_subscription_decision(_inputs(terms, derived=healthy_with_valuation, recent_ipo_outcomes=FAVORABLE_OUTCOMES))
+    result = evaluate_subscription_decision(
+        _inputs(terms, derived=healthy_derived, recent_ipo_outcomes=FAVORABLE_OUTCOMES, financial_observations=SUFFICIENT_FINANCIAL_OBSERVATIONS)
+    )
 
     assert result.ownership_view == "HOLD_CANDIDATE"
     assert result.action == "SUBSCRIBE_WITH_HOLD_OPTION"
@@ -362,14 +388,15 @@ def test_subscribe_with_hold_option_requires_hold_candidate_ownership():
 
 def test_red_flag_forces_pass_regardless_of_favorable_regime_or_ownership():
     terms = _resolved_terms(new_issue_shares=_field("extracted", 100.0, "shares"))  # breaks the share equation
-    healthy_with_valuation = _derived(
+    healthy_derived = _derived(
         revenue_growth_yoy=_derived_feature("revenue_growth_yoy", "computed", 40.0),
         net_margin=_derived_feature("net_margin", "computed", 20.0),
         current_ratio=_derived_feature("current_ratio", "computed", 3.0),
-        recalculated_pe=_derived_feature("recalculated_pe", "computed", 8.5),
     )
 
-    result = evaluate_subscription_decision(_inputs(terms, derived=healthy_with_valuation, recent_ipo_outcomes=FAVORABLE_OUTCOMES))
+    result = evaluate_subscription_decision(
+        _inputs(terms, derived=healthy_derived, recent_ipo_outcomes=FAVORABLE_OUTCOMES, financial_observations=SUFFICIENT_FINANCIAL_OBSERVATIONS)
+    )
 
     assert result.action == "PASS_SUBSCRIPTION"
     assert result.strongest_risks
@@ -414,3 +441,36 @@ def test_allocation_scenarios_never_change_the_action():
     assert with_favorable.allocation_scenarios[0].hypothetical_retail_participant_count == with_no_regime.allocation_scenarios[0].hypothetical_retail_participant_count
     assert with_favorable.action == "SUBSCRIBE_FOR_LISTING_TRADE"
     assert with_no_regime.action == "WATCH_SUBSCRIPTION"
+
+
+# --------------------------------------------------------------------
+# Valuation evidence integration.
+# --------------------------------------------------------------------
+
+
+def test_valuation_evidence_is_exposed_on_the_decision_and_never_recomputed():
+    terms = _resolved_terms()
+
+    result = evaluate_subscription_decision(_inputs(terms, financial_observations=SUFFICIENT_FINANCIAL_OBSERVATIONS))
+
+    assert result.valuation_evidence.implied_market_cap.status == "computed"
+    assert result.valuation_evidence.pe_at_offer.status == "computed"
+    assert result.valuation_evidence.sufficiency == "SUFFICIENT"
+
+
+def test_healthy_ratios_cannot_substitute_for_valuation_evidence():
+    """"Do not let healthy company ratios substitute for valuation" —
+    even a POSITIVE financial_quality read must not, on its own, flip
+    valuation_evidence.sufficiency or unlock HOLD_CANDIDATE."""
+    terms = _resolved_terms()
+    healthy_derived = _derived(
+        revenue_growth_yoy=_derived_feature("revenue_growth_yoy", "computed", 30.0),
+        net_margin=_derived_feature("net_margin", "computed", 25.0),
+        current_ratio=_derived_feature("current_ratio", "computed", 4.0),
+    )
+
+    result = evaluate_subscription_decision(_inputs(terms, derived=healthy_derived))  # no financial_observations
+
+    assert result.financial_quality == "POSITIVE"
+    assert result.valuation_evidence.sufficiency == "INSUFFICIENT"
+    assert result.ownership_view == "WATCH"

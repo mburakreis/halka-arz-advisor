@@ -58,6 +58,7 @@ from halka_arz_advisor.kap.ocr import DEFAULT_OCR_CACHE_DIR, OcrCache  # noqa: E
 from halka_arz_advisor.kap.offering_terms import build_offering_terms  # noqa: E402
 from halka_arz_advisor.kap.pdf import PdfCache  # noqa: E402
 from halka_arz_advisor.kap.sector import classify_sector  # noqa: E402
+from halka_arz_advisor.kap.valuation import build_valuation_evidence  # noqa: E402
 from halka_arz_advisor.notify.env import load_dotenv_if_present  # noqa: E402
 from halka_arz_advisor.notify.subscription_card import format_subscription_card  # noqa: E402
 from halka_arz_advisor.notify.telegram import load_credentials_from_env, send_message  # noqa: E402
@@ -190,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:
     financial_series = aggregate_company_financial_series(processed).get(record_id, ())
     sector = classify_sector(company_name)
     derived_financials = compute_derived_financial_features(financial_series, company_facts, sector=sector)
+    valuation_evidence = build_valuation_evidence(offering_terms, completed_terms, financial_series, sector=sector)
 
     market_context = None
     evds_cache = EvdsCache(args.evds_cache_dir)
@@ -209,8 +211,8 @@ def main(argv: list[str] | None = None) -> int:
     as_of = datetime.combine(args.as_of, datetime.min.time()) if args.as_of else datetime.now(UTC)
     inputs = SubscriptionDecisionInputs(
         offering_terms=offering_terms, completed_terms=completed_terms, derived_financials=derived_financials,
-        market_context=market_context, as_of=as_of, ticker=ticker, recent_ipo_outcomes=recent_ipo_outcomes,
-        disclosures=tuple(company_disclosures),
+        valuation_evidence=valuation_evidence, market_context=market_context, as_of=as_of, ticker=ticker,
+        recent_ipo_outcomes=recent_ipo_outcomes, disclosures=tuple(company_disclosures),
     )
     decision = evaluate_subscription_decision(inputs)
 
@@ -225,7 +227,8 @@ def main(argv: list[str] | None = None) -> int:
         f"\n[action={decision.action} edge={decision.subscription_edge} mechanics={decision.mechanics_state} "
         f"financial_quality={decision.financial_quality} ownership={decision.ownership_view} "
         f"sub_evidence={decision.subscription_evidence_grade} own_evidence={decision.ownership_evidence_grade} "
-        f"regime={decision.recent_ipo_regime.status}({decision.recent_ipo_regime.mature_ipo_count})]",
+        f"regime={decision.recent_ipo_regime.status}({decision.recent_ipo_regime.mature_ipo_count}) "
+        f"valuation={decision.valuation_evidence.sufficiency}]",
         file=sys.stderr,
     )
 

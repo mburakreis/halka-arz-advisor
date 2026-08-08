@@ -2,8 +2,11 @@ from datetime import date, datetime
 
 from halka_arz_advisor.decision.subscription_v1 import SubscriptionDecisionInputs, evaluate_subscription_decision
 from halka_arz_advisor.ipo_outcomes.models import IpoMarketOutcome
+from halka_arz_advisor.kap.extraction import SourceRef
+from halka_arz_advisor.kap.financials import FinancialObservation
 from halka_arz_advisor.kap.manual_confirmation import ManualFieldConfirmation, complete_offering_terms
 from halka_arz_advisor.kap.offering_terms import OFFERING_TERM_FIELD_NAMES, OfferingTerms, OfferingTermField, OfferingTermObservation
+from halka_arz_advisor.kap.valuation import build_valuation_evidence
 from halka_arz_advisor.notify.subscription_card import MAX_MESSAGE_CHARS, format_subscription_card
 
 AS_OF = datetime(2026, 8, 10)
@@ -30,6 +33,7 @@ def _resolved_terms(**overrides) -> OfferingTerms:
         retail_distribution_rule=_field("extracted", "equal"),
         retail_allocation_percentage=_field("extracted", 40.0, "percent"),
         retail_offered_shares=_field("extracted", 400_000.0, "shares"),
+        implied_post_money_market_cap=_field("extracted", 5_000_000_000.0, "TRY"),
     )
     base.update(overrides)
     return _terms(**base)
@@ -50,12 +54,21 @@ def _outcome(ticker: str, trading_start: date, bist_relative_5d: float) -> IpoMa
 
 FAVORABLE_OUTCOMES = tuple(_outcome(f"F{i}", date(2026, 7, 15), 25.0) for i in range(5))
 
+_PDR_SOURCE = SourceRef("price_determination_report", "d-pdr", "url", 5)
+SUFFICIENT_FINANCIAL_OBSERVATIONS = (
+    FinancialObservation(
+        "net_income", 500_000.0, "TRY", "thousand", date(2024, 1, 1), date(2024, 12, 31), "ANNUAL", "consolidated", None,
+        "x", _PDR_SOURCE,
+    ),
+)
+
 
 def _decision(terms, **kwargs):
     completed = complete_offering_terms(terms, kwargs.pop("confirmations", ()))
+    valuation = build_valuation_evidence(terms, completed, kwargs.pop("financial_observations", ()))
     inputs = SubscriptionDecisionInputs(
         offering_terms=terms, completed_terms=completed, derived_financials=kwargs.pop("derived", None),
-        market_context=kwargs.pop("market", None), as_of=AS_OF, ticker="ORNK",
+        valuation_evidence=valuation, market_context=kwargs.pop("market", None), as_of=AS_OF, ticker="ORNK",
         recent_ipo_outcomes=kwargs.pop("recent_ipo_outcomes", ()), disclosures=kwargs.pop("disclosures", ()),
     )
     return completed, evaluate_subscription_decision(inputs)
@@ -174,6 +187,34 @@ def test_allocation_scenarios_are_labeled_as_not_a_forecast():
     )
 
     assert "bir talep tahmini değildir" in message
+
+
+def test_valuation_section_shows_computed_multiples_and_is_never_a_cheap_expensive_verdict():
+    terms = _resolved_terms()
+    completed, decision = _decision(terms, recent_ipo_outcomes=FAVORABLE_OUTCOMES, financial_observations=SUFFICIENT_FINANCIAL_OBSERVATIONS)
+
+    message = format_subscription_card(
+        company_name="Örnek A.Ş.", ticker="ORNK", offering_terms=terms, completed_terms=completed, decision=decision,
+    )
+
+    assert "Değerleme" in message
+    assert "F/K:" in message and "bilinmiyor" not in message.split("F/K:")[1][:20]
+    assert "5.000.000.000 TL" in message
+    assert "ucuz/pahalı hükmü değildir" in message
+    assert "ucuz" not in message.replace("ucuz/pahalı hükmü değildir", "")
+    assert "pahalı" not in message.replace("ucuz/pahalı hükmü değildir", "")
+
+
+def test_valuation_section_shows_why_multiples_are_unavailable_when_no_financials():
+    terms = _resolved_terms()
+    completed, decision = _decision(terms, recent_ipo_outcomes=FAVORABLE_OUTCOMES)  # no financial_observations
+
+    message = format_subscription_card(
+        company_name="Örnek A.Ş.", ticker="ORNK", offering_terms=terms, completed_terms=completed, decision=decision,
+    )
+
+    assert "F/K: bilinmiyor" in message
+    assert "Fiyat sağlaması için kanıt: Yetersiz" in message
 
 
 def test_card_stays_within_the_telegram_message_length_budget():

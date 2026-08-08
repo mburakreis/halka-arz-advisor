@@ -137,6 +137,7 @@ def test_confirmable_fields_matches_the_documented_critical_set():
         "retail_distribution_rule",
         "distribution_method",
         "total_offered_shares",
+        "implied_post_money_market_cap",
     }
 
 

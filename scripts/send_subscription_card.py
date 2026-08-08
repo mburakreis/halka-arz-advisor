@@ -44,6 +44,7 @@ from halka_arz_advisor.kap.documents import (  # noqa: E402
     aggregate_company_financial_series,
     process_disclosure_documents,
 )
+from halka_arz_advisor.ipo_outcomes import IpoMarketOutcomeStore, load_all_outcomes  # noqa: E402
 from halka_arz_advisor.kap.exceptions import KapApiError  # noqa: E402
 from halka_arz_advisor.kap.manual_confirmation import (  # noqa: E402
     DEFAULT_MANUAL_CONFIRMATION_CACHE_DIR,
@@ -78,6 +79,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--backfill-cache-dir", type=Path, default=PROJECT_ROOT / "data" / "cache" / "kap_backfill")
     parser.add_argument("--manual-confirmation-dir", type=Path, default=PROJECT_ROOT / DEFAULT_MANUAL_CONFIRMATION_CACHE_DIR)
     parser.add_argument("--evds-cache-dir", type=Path, default=PROJECT_ROOT / "data" / "cache" / "evds")
+    parser.add_argument("--ipo-outcomes-dir", type=Path, default=PROJECT_ROOT / "data" / "cache" / "ipo_outcomes")
     parser.add_argument("--env-file", type=Path, default=PROJECT_ROOT / ".env")
     parser.add_argument(
         "--confirm", action="append", default=[], metavar="FIELD=VALUE",
@@ -200,11 +202,15 @@ def main(argv: list[str] | None = None) -> int:
             cpi_observations=evds_cache.get_observations("cpi_index"),
         )
 
+    outcome_store = IpoMarketOutcomeStore(args.ipo_outcomes_dir)
+    recent_ipo_outcomes = load_all_outcomes(outcome_store)
+
     company_disclosures = [d for d in processed if d.matched_spk_record_id == record_id]
     as_of = datetime.combine(args.as_of, datetime.min.time()) if args.as_of else datetime.now(UTC)
     inputs = SubscriptionDecisionInputs(
         offering_terms=offering_terms, completed_terms=completed_terms, derived_financials=derived_financials,
-        market_context=market_context, as_of=as_of, disclosures=tuple(company_disclosures),
+        market_context=market_context, as_of=as_of, ticker=ticker, recent_ipo_outcomes=recent_ipo_outcomes,
+        disclosures=tuple(company_disclosures),
     )
     decision = evaluate_subscription_decision(inputs)
 
@@ -215,7 +221,13 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     print(message)
-    print(f"\n[action={decision.action} edge={decision.subscription_edge} ownership={decision.ownership_view} evidence={decision.evidence_grade}]", file=sys.stderr)
+    print(
+        f"\n[action={decision.action} edge={decision.subscription_edge} mechanics={decision.mechanics_state} "
+        f"financial_quality={decision.financial_quality} ownership={decision.ownership_view} "
+        f"sub_evidence={decision.subscription_evidence_grade} own_evidence={decision.ownership_evidence_grade} "
+        f"regime={decision.recent_ipo_regime.status}({decision.recent_ipo_regime.mature_ipo_count})]",
+        file=sys.stderr,
+    )
 
     if args.send:
         credentials = load_credentials_from_env()

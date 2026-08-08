@@ -8,53 +8,56 @@ from ``engine``/``scoring_config``/``catalog``/``audit``/``snapshot``/
 :mod:`halka_arz_advisor.kap.offering_terms`,
 :mod:`halka_arz_advisor.kap.manual_confirmation`,
 :mod:`halka_arz_advisor.kap.allocation_scenario`,
-:mod:`halka_arz_advisor.kap.derived_financials`, and
+:mod:`halka_arz_advisor.kap.derived_financials`,
+:mod:`halka_arz_advisor.ipo_outcomes.regime`, and
 :mod:`halka_arz_advisor.evds.models`.
 
-**Gates, not points.** Every rule below is a pass/fail gate evaluated in
-a fixed order; nothing here sums or averages a "score" across rules, so
-a strong result on one axis can never buy back a failure on another:
+**r2 (2026-08-08): hardened against several real economic overclaims r1
+made** (see :data:`RULE_VERSION`) — r1 treated "equal distribution + a
+substantial retail tranche" as `FAVORABLE` subscription edge, which is
+an allocation-*mechanics* description, not evidence about whether
+subscribing is actually a good trade. This version separates the two
+concepts entirely:
 
-- **Critical subscription evidence is a gate.** If any of ``offer_price``,
-  ``subscription_start``, ``subscription_end``, ``distribution_method``,
-  ``total_offered_shares``, ``retail_distribution_rule``, or at least
-  one of ``retail_offered_shares``/``retail_allocation_percentage`` is
-  not resolved (automatically *or* via a manual
-  :mod:`~halka_arz_advisor.kap.manual_confirmation` — see
-  :data:`_CRITICAL_FIELDS`/:data:`_RETAIL_EVIDENCE_FIELDS`), the result
-  is ``CANNOT_ASSESS_SUBSCRIPTION`` — never a guess, and never the same
-  as "we looked and it's bad" (``PASS_SUBSCRIPTION``).
-- **A structural red flag (an internally inconsistent offered-share
-  equation, or a disclosure title indicating withdrawal/cancellation/
-  suspension) forces ``PASS_SUBSCRIPTION`` outright** — no amount of
-  positive company evidence overrides it (see
-  :func:`_evaluate_red_flags`).
-- **``subscription_edge`` (mechanics favorability) is computed purely
-  from ``OfferingTerms``** — never from a discount/valuation comparison
-  (a headline discount alone is deliberately never treated as a
-  positive signal here) and never from macro/BIST data. An
-  ``"UNFAVORABLE"`` edge blocks ``SUBSCRIBE_*`` regardless of how good
-  the company's fundamentals look.
-- **``ownership_view`` is computed purely from
-  :class:`~halka_arz_advisor.kap.derived_financials.DerivedFinancialFeatures`**
-  — never from market-context/BIST-regime data (so a strong BIST regime
-  can never compensate for weak company evidence) and never from
-  ``ipo_outcomes``/historical labels (no outcome leakage, no
-  outcome-tuned thresholds; every threshold here is a stated, reasoned
-  constant, not fit to past returns). A single red-flag ratio (negative
-  margin, high leverage, sub-1.0 liquidity/coverage) forces
-  ``AVOID_LONG_TERM`` outright, the same non-compensable pattern as the
-  subscription red-flag gate.
-- ``ownership_view`` can be ``NOT_ASSESSABLE`` while the *subscription*
-  action is still ``SUBSCRIBE_FOR_LISTING_TRADE`` — a pure listing-day
-  flip doesn't require any view on the company's fundamentals, only on
-  the mechanics of getting (and immediately selling) shares.
-- :data:`~halka_arz_advisor.evds.models.MarketContextSnapshot` is
-  carried on the inputs and surfaced by callers (e.g. the Telegram
-  card) purely as *regime context* — it is never read by any function
-  in this module that decides ``action``/``subscription_edge``/
-  ``ownership_view``. ``policy_rate_minus_cpi`` in particular must never
-  drive this decision.
+- :func:`_mechanics_state` describes allocation mechanics only
+  (``SUPPORTIVE``/``NEUTRAL``/``CONSTRAINED``/``UNKNOWN``, from
+  ``OfferingTerms`` alone) and never determines ``subscription_edge`` on
+  its own. A `"proportional"` distribution rule is *not* automatically
+  ``CONSTRAINED`` merely because exact lots are harder to estimate in
+  advance — only a genuinely thin retail tranche is.
+- :func:`_subscription_edge` now reads only
+  :class:`~halka_arz_advisor.ipo_outcomes.regime.RecentIpoRegime` — a
+  leakage-safe, point-in-time aggregate of how *other*, already-settled
+  recent IPOs performed over their first trading week (never the target
+  IPO's own outcome; see that module's own docstring for the safety
+  argument). Without enough mature comparables, ``subscription_edge``
+  stays ``"UNKNOWN"`` — never inferred from mechanics alone.
+- Evidence is now two separate grades
+  (``subscription_evidence_grade``/``ownership_evidence_grade``),
+  each counting only the inputs that dimension's own decision logic
+  actually reads — market-context/BIST data inflates neither, since
+  neither reads it.
+- ``ownership_view`` no longer follows from healthy financial ratios
+  alone. :func:`_financial_quality` (``POSITIVE``/``MIXED``/
+  ``NEGATIVE``/``UNKNOWN``) is a pure ratio read; ``HOLD_CANDIDATE``
+  additionally requires a resolved valuation anchor (currently: a
+  successfully computed ``recalculated_pe`` — see
+  :mod:`halka_arz_advisor.kap.derived_financials`; no new valuation
+  extractor was added for this). Healthy ratios with no valuation
+  anchor cap ``ownership_view`` at ``WATCH``.
+- ``intended_horizon`` no longer implies a same-day, price-limit-immune
+  "listing day flip" — see :data:`_HORIZON_BY_ACTION`.
+- A new ``WATCH_SUBSCRIPTION`` action represents "terms are resolved
+  and there's no blocker, but no positive subscription edge is
+  established" — the previous version defaulted this exact case to
+  ``SUBSCRIBE_FOR_LISTING_TRADE``, manufacturing a recommendation from
+  an absence of evidence.
+
+**Gates, not points** (unchanged in spirit from r1). Every rule below is
+a pass/fail gate evaluated in a fixed order; nothing here sums or
+averages a "score" across rules, so a strong result on one axis can
+never buy back a failure on another — see :func:`evaluate_subscription_decision`
+for the exact order.
 """
 
 from __future__ import annotations
@@ -64,26 +67,33 @@ from datetime import datetime
 from typing import Literal
 
 from ..evds.models import MarketContextSnapshot
+from ..ipo_outcomes.models import IpoMarketOutcome
+from ..ipo_outcomes.regime import RecentIpoRegime, STRONG_EVIDENCE_MATURE_IPO_COUNT, build_recent_ipo_regime
 from ..kap.allocation_scenario import AllocationScenario, build_allocation_scenario
-from ..kap.derived_financials import DERIVED_FINANCIAL_FEATURE_NAMES, DerivedFinancialFeatures
+from ..kap.derived_financials import DerivedFinancialFeatures
 from ..kap.manual_confirmation import CompletedOfferingTerms, effective_offering_terms
 from ..kap.models import KapDisclosure
 from ..kap.offering_terms import OfferingTerms
 from ..kap.text import fold_turkish
 
-RULE_VERSION = "subscription_v1_r1"
+RULE_VERSION = "subscription_v1_r2"
 
 SubscriptionAction = Literal[
     "SUBSCRIBE_FOR_LISTING_TRADE",
     "SUBSCRIBE_WITH_HOLD_OPTION",
+    "WATCH_SUBSCRIPTION",
     "PASS_SUBSCRIPTION",
     "PASS_AND_REASSESS_AFTER_LISTING",
     "CANNOT_ASSESS_SUBSCRIPTION",
 ]
 SubscriptionEdge = Literal["FAVORABLE", "NEUTRAL", "UNFAVORABLE", "UNKNOWN"]
+MechanicsState = Literal["SUPPORTIVE", "NEUTRAL", "CONSTRAINED", "UNKNOWN"]
+FinancialQuality = Literal["POSITIVE", "MIXED", "NEGATIVE", "UNKNOWN"]
 OwnershipView = Literal["HOLD_CANDIDATE", "WATCH", "AVOID_LONG_TERM", "NOT_ASSESSABLE"]
 EvidenceGrade = Literal["STRONG", "MODERATE", "WEAK", "NONE"]
-SubscriptionHorizon = Literal["listing_day_flip", "flip_or_hold", "watch_post_listing", "not_applicable"]
+SubscriptionHorizon = Literal[
+    "5D_LISTING_TRADE", "5D_LISTING_TRADE_OR_HOLD", "watch_pending_edge", "watch_post_listing", "not_applicable"
+]
 
 # The non-retail critical fields — every one must be effective_status
 # == "extracted" (automatic or manually confirmed) or the result is
@@ -106,7 +116,9 @@ _RETAIL_EVIDENCE_FIELDS: tuple[str, ...] = ("retail_offered_shares", "retail_all
 # A retail tranche below 10% of a Turkish IPO's total offering is thin
 # relative to the SPK-mandated minimums this project has observed in
 # real tahsisat tables (see kap.extraction); 20%+ is a substantial,
-# guaranteed-access tranche under equal distribution.
+# guaranteed-access tranche under equal distribution. These describe
+# *mechanics* only (see _mechanics_state) — they no longer feed
+# subscription_edge at all (see module docstring).
 _RETAIL_ALLOCATION_THIN_PCT = 10.0
 _RETAIL_ALLOCATION_SUBSTANTIAL_PCT = 20.0
 
@@ -120,12 +132,14 @@ _INTEREST_COVERAGE_RED_FLAG = 1.0
 _CURRENT_RATIO_POSITIVE = 1.5
 _DEBT_TO_EQUITY_POSITIVE = 1.0
 _INTEREST_COVERAGE_POSITIVE = 3.0
-_MIN_RESOLVED_RATIOS_FOR_HOLD_CANDIDATE = 2
+_MIN_RESOLVED_RATIOS_FOR_POSITIVE = 2
 
 # A handful of round, illustrative hypothetical retail-participant
 # counts spanning a small/medium/large demand scenario — never a
 # forecast of actual demand (see kap.allocation_scenario's own module
-# docstring: the count is always a caller-supplied what-if).
+# docstring: the count is always a caller-supplied what-if), and never
+# read by any function in this module that decides action/edge/
+# ownership — purely descriptive output.
 DEFAULT_ALLOCATION_SCENARIO_PARTICIPANT_COUNTS: tuple[int, ...] = (50_000, 200_000, 500_000)
 
 # Same generic Turkish withdrawal/cancellation/postponement keyword set
@@ -135,8 +149,12 @@ DEFAULT_ALLOCATION_SCENARIO_PARTICIPANT_COUNTS: tuple[int, ...] = (50_000, 200_0
 _WITHDRAWAL_KEYWORDS: tuple[str, ...] = ("iptal", "vazgecme", "vazgecti", "erteleme", "durduruldu", "askiya alin")
 
 _HORIZON_BY_ACTION: dict[SubscriptionAction, SubscriptionHorizon] = {
-    "SUBSCRIBE_FOR_LISTING_TRADE": "listing_day_flip",
-    "SUBSCRIBE_WITH_HOLD_OPTION": "flip_or_hold",
+    # Named after the one evidence window this project can actually
+    # back with real data (RecentIpoRegime's own 5-trading-day read) —
+    # never implies a same-day, BIST-price-limit-immune exit.
+    "SUBSCRIBE_FOR_LISTING_TRADE": "5D_LISTING_TRADE",
+    "SUBSCRIBE_WITH_HOLD_OPTION": "5D_LISTING_TRADE_OR_HOLD",
+    "WATCH_SUBSCRIPTION": "watch_pending_edge",
     "PASS_SUBSCRIPTION": "not_applicable",
     "PASS_AND_REASSESS_AFTER_LISTING": "watch_post_listing",
     "CANNOT_ASSESS_SUBSCRIPTION": "not_applicable",
@@ -150,6 +168,12 @@ class SubscriptionDecisionInputs:
     derived_financials: DerivedFinancialFeatures | None
     market_context: MarketContextSnapshot | None
     as_of: datetime
+    ticker: str | None = None
+    # OTHER IPOs' already-cached outcomes (never the target's own) —
+    # see ipo_outcomes.regime.build_recent_ipo_regime, which this
+    # module calls with `exclude_ticker=ticker` to make the exclusion
+    # structural rather than a caller obligation.
+    recent_ipo_outcomes: tuple[IpoMarketOutcome, ...] = ()
     disclosures: tuple[KapDisclosure, ...] = ()
 
 
@@ -157,10 +181,15 @@ class SubscriptionDecisionInputs:
 class SubscriptionDecisionV1:
     action: SubscriptionAction
     subscription_edge: SubscriptionEdge
+    mechanics_state: MechanicsState
     intended_horizon: SubscriptionHorizon
-    evidence_grade: EvidenceGrade
+    subscription_evidence_grade: EvidenceGrade
+    ownership_evidence_grade: EvidenceGrade
+    financial_quality: FinancialQuality
     ownership_view: OwnershipView
+    recent_ipo_regime: RecentIpoRegime
     allocation_scenarios: tuple[AllocationScenario, ...]
+    manually_confirmed_fields: tuple[str, ...]
     strongest_positive_evidence: tuple[str, ...]
     strongest_risks: tuple[str, ...]
     missing_critical_evidence: tuple[str, ...]
@@ -212,36 +241,54 @@ def _evaluate_red_flags(
     return bool(reasons), tuple(reasons)
 
 
-def _subscription_edge(completed: CompletedOfferingTerms, red_flag_triggered: bool) -> tuple[SubscriptionEdge, tuple[str, ...]]:
-    if red_flag_triggered:
-        return "UNFAVORABLE", ("a structural red flag was found in the offering's own stated mechanics (see risks)",)
-
+def _mechanics_state(completed: CompletedOfferingTerms) -> tuple[MechanicsState, tuple[str, ...]]:
+    """Describes allocation mechanics only — from ``OfferingTerms``
+    alone, never from ``RecentIpoRegime``/market data, and never itself
+    read by :func:`_subscription_edge` (see module docstring)."""
     rule_field = completed.get("retail_distribution_rule")
     if rule_field.effective_status != "extracted":
         return "UNKNOWN", ("retail_distribution_rule is not resolved (automatically or manually)",)
 
-    if rule_field.effective_value == "proportional":
-        return "UNFAVORABLE", (
-            "retail tranche uses proportional distribution — the actual per-investor allocation depends on "
-            "total demand at subscription close and cannot be sized in advance",
-        )
-
     pct_field = completed.get("retail_allocation_percentage")
-    if pct_field.effective_status != "extracted":
-        return "NEUTRAL", ("retail distribution is equal, but the retail tranche's size (% of the offering) is not known",)
+    pct = float(pct_field.effective_value) if pct_field.effective_status == "extracted" else None  # type: ignore[arg-type]
 
-    pct = float(pct_field.effective_value)  # type: ignore[arg-type]
-    if pct < _RETAIL_ALLOCATION_THIN_PCT:
-        return "UNFAVORABLE", (f"retail tranche is thin: only {pct:.1f}% of the offering is allocated to retail investors",)
-    if pct >= _RETAIL_ALLOCATION_SUBSTANTIAL_PCT:
-        return "FAVORABLE", (f"retail distribution is equal with a substantial {pct:.1f}% retail tranche",)
-    return "NEUTRAL", (f"retail distribution is equal with a {pct:.1f}% retail tranche (neither thin nor substantial)",)
+    if pct is not None and pct < _RETAIL_ALLOCATION_THIN_PCT:
+        return "CONSTRAINED", (f"retail tranche is thin: only {pct:.1f}% of the offering is allocated to retail investors",)
+
+    rule_label = "equal" if rule_field.effective_value == "equal" else "proportional"
+    if rule_field.effective_value == "equal" and pct is not None and pct >= _RETAIL_ALLOCATION_SUBSTANTIAL_PCT:
+        return "SUPPORTIVE", (f"equal distribution with a substantial {pct:.1f}% retail tranche",)
+
+    size_desc = "an unknown-size" if pct is None else f"a {pct:.1f}%"
+    return "NEUTRAL", (
+        f"{rule_label} distribution with {size_desc} retail tranche — describes allocation mechanics only, "
+        "not whether subscribing is a good trade",
+    )
 
 
-def _ownership_view(derived: DerivedFinancialFeatures | None) -> tuple[OwnershipView, tuple[str, ...], tuple[str, ...]]:
-    """Never reads market_context — see module docstring."""
+def _subscription_edge(regime: RecentIpoRegime) -> tuple[SubscriptionEdge, tuple[str, ...]]:
+    """Reads only ``RecentIpoRegime`` — never ``OfferingTerms``
+    mechanics, never market context (see module docstring)."""
+    if regime.status == "UNKNOWN":
+        return "UNKNOWN", (
+            f"only {regime.mature_ipo_count} mature comparable recent IPO(s) in the last {regime.window_days} "
+            "day(s) — too few to read a short-term subscription regime",
+        )
+    share = regime.positive_bist_relative_share_5d
+    detail = f"{regime.mature_ipo_count} mature recent IPOs in the last {regime.window_days} day(s), {share:.0%} with a positive 5d BIST-relative return"  # type: ignore[str-format]
+    if regime.status == "FAVORABLE":
+        return "FAVORABLE", (detail,)
+    if regime.status == "UNFAVORABLE":
+        return "UNFAVORABLE", (detail,)
+    return "NEUTRAL", (detail,)
+
+
+def _financial_quality(derived: DerivedFinancialFeatures | None) -> tuple[FinancialQuality, tuple[str, ...], tuple[str, ...]]:
+    """A pure ratio read — never market_context, never a valuation
+    judgment (see :func:`_valuation_anchor_available` for that,
+    separately)."""
     if derived is None:
-        return "NOT_ASSESSABLE", (), ()
+        return "UNKNOWN", (), ()
 
     def resolved_value(name: str) -> float | None:
         feature = getattr(derived, name)
@@ -262,7 +309,7 @@ def _ownership_view(derived: DerivedFinancialFeatures | None) -> tuple[Ownership
     if interest_coverage is not None and interest_coverage < _INTEREST_COVERAGE_RED_FLAG:
         risks.append(f"interest_coverage is below 1.0 ({interest_coverage:.2f}) — operating profit may not cover finance expense")
     if risks:
-        return "AVOID_LONG_TERM", (), tuple(risks)
+        return "NEGATIVE", (), tuple(risks)
 
     candidate_values: dict[str, float | None] = {
         "revenue_growth_yoy": resolved_value("revenue_growth_yoy"),
@@ -280,31 +327,66 @@ def _ownership_view(derived: DerivedFinancialFeatures | None) -> tuple[Ownership
     }
     resolved = {name: value for name, value in candidate_values.items() if value is not None}
     if not resolved:
-        return "NOT_ASSESSABLE", (), ()
+        return "UNKNOWN", (), ()
 
     positives = [f"{name} = {value:.2f} (healthy)" for name, value in resolved.items() if positive_predicates[name](value)]
     all_positive = len(positives) == len(resolved)
+    if len(resolved) >= _MIN_RESOLVED_RATIOS_FOR_POSITIVE and all_positive:
+        return "POSITIVE", tuple(positives), ()
+    return "MIXED", tuple(positives), ()
 
-    if len(resolved) >= _MIN_RESOLVED_RATIOS_FOR_HOLD_CANDIDATE and all_positive:
-        return "HOLD_CANDIDATE", tuple(positives), ()
-    return "WATCH", tuple(positives), ()
+
+def _valuation_anchor_available(derived: DerivedFinancialFeatures | None) -> bool:
+    """Whether *any* existing valuation figure (currently: a
+    successfully computed ``recalculated_pe`` — see
+    ``kap.derived_financials``'s own docstring on why this is so often
+    ``"unavailable"`` today, a real cross-currency extraction gap, not
+    a bug) is resolved. No new valuation extractor is added here —
+    this only checks what's already computed."""
+    if derived is None:
+        return False
+    return derived.recalculated_pe.status == "computed"
 
 
-def _evidence_grade(
-    completed: CompletedOfferingTerms, derived: DerivedFinancialFeatures | None, market: MarketContextSnapshot | None
-) -> EvidenceGrade:
-    if _missing_critical_evidence(completed):
+def _ownership_view(financial_quality: FinancialQuality, valuation_anchor_available: bool) -> OwnershipView:
+    if financial_quality == "NEGATIVE":
+        return "AVOID_LONG_TERM"
+    if financial_quality == "UNKNOWN":
+        return "NOT_ASSESSABLE"
+    if financial_quality == "MIXED":
+        return "WATCH"
+    # POSITIVE: still requires a valuation anchor for HOLD_CANDIDATE —
+    # healthy ratios alone are not enough (see module docstring).
+    return "HOLD_CANDIDATE" if valuation_anchor_available else "WATCH"
+
+
+def _subscription_evidence_grade(missing_critical: tuple[str, ...], regime: RecentIpoRegime) -> EvidenceGrade:
+    """Counts only what :func:`_missing_critical_evidence`/
+    :func:`_subscription_edge` actually read — never market_context,
+    never financial ratios (those belong to
+    :func:`_ownership_evidence_grade` instead, per "a feature not used
+    by a dimension's decision logic must not inflate that dimension's
+    evidence grade")."""
+    if missing_critical:
         return "NONE"
-    supporting = 0
-    if derived is not None:
-        supporting += sum(1 for name in DERIVED_FINANCIAL_FEATURE_NAMES if getattr(derived, name).status == "computed")
-    if market is not None:
-        supporting += len(market.features)
-    if supporting == 0:
+    if regime.status == "UNKNOWN":
         return "WEAK"
-    if supporting <= 3:
+    if regime.mature_ipo_count < STRONG_EVIDENCE_MATURE_IPO_COUNT:
         return "MODERATE"
     return "STRONG"
+
+
+def _ownership_evidence_grade(
+    financial_quality: FinancialQuality, valuation_anchor_available: bool, derived: DerivedFinancialFeatures | None
+) -> EvidenceGrade:
+    """Counts only what :func:`_financial_quality`/
+    :func:`_valuation_anchor_available` actually read — never
+    subscription-mechanics/regime fields."""
+    if derived is None:
+        return "NONE"
+    if financial_quality == "UNKNOWN":
+        return "WEAK"
+    return "STRONG" if valuation_anchor_available else "MODERATE"
 
 
 def _window_closed(completed: CompletedOfferingTerms, as_of: datetime) -> bool:
@@ -316,27 +398,28 @@ def _window_closed(completed: CompletedOfferingTerms, as_of: datetime) -> bool:
 
 def evaluate_subscription_decision(inputs: SubscriptionDecisionInputs) -> SubscriptionDecisionV1:
     completed = inputs.completed_terms
-    evidence_grade = _evidence_grade(completed, inputs.derived_financials, inputs.market_context)
     missing = _missing_critical_evidence(completed)
+    manually_confirmed = tuple(sorted(name for name, field in completed.as_dict().items() if field.source == "user_confirmed"))
 
-    if missing:
-        return SubscriptionDecisionV1(
-            action="CANNOT_ASSESS_SUBSCRIPTION",
-            subscription_edge="UNKNOWN",
-            intended_horizon=_HORIZON_BY_ACTION["CANNOT_ASSESS_SUBSCRIPTION"],
-            evidence_grade=evidence_grade,
-            ownership_view="NOT_ASSESSABLE",
-            allocation_scenarios=(),
-            strongest_positive_evidence=(),
-            strongest_risks=(),
-            missing_critical_evidence=missing,
-            reasons=(f"missing critical subscription evidence: {', '.join(missing)}",),
-            rule_version=RULE_VERSION,
-        )
+    # Every one of these is computed unconditionally, even if the
+    # subscription critical-evidence gate below will force
+    # CANNOT_ASSESS_SUBSCRIPTION — ownership/regime context are
+    # independent dimensions a human reviewing the card can still use
+    # (e.g. to decide whether completing the missing fields is even
+    # worth doing), matching "ownership view may remain assessable (or
+    # not) independent of the subscription action" from this module's
+    # own design.
+    regime = build_recent_ipo_regime(inputs.recent_ipo_outcomes, as_of=inputs.as_of, exclude_ticker=inputs.ticker)
+    subscription_edge, edge_reasons = _subscription_edge(regime)
+    mechanics_state, mechanics_reasons = _mechanics_state(completed)
+    financial_quality, fin_positives, fin_risks = _financial_quality(inputs.derived_financials)
+    valuation_anchor = _valuation_anchor_available(inputs.derived_financials)
+    ownership_view = _ownership_view(financial_quality, valuation_anchor)
+
+    subscription_grade = _subscription_evidence_grade(missing, regime)
+    ownership_grade = _ownership_evidence_grade(financial_quality, valuation_anchor, inputs.derived_financials)
 
     red_flag_triggered, red_flag_reasons = _evaluate_red_flags(inputs.offering_terms, completed, inputs.disclosures)
-    edge, edge_reasons = _subscription_edge(completed, red_flag_triggered)
-    ownership_view, ownership_positives, ownership_risks = _ownership_view(inputs.derived_financials)
     window_closed = _window_closed(completed, inputs.as_of)
 
     effective_terms = effective_offering_terms(inputs.offering_terms, completed)
@@ -346,31 +429,73 @@ def evaluate_subscription_decision(inputs: SubscriptionDecisionInputs) -> Subscr
 
     watchworthy = ownership_view in ("HOLD_CANDIDATE", "WATCH")
 
-    if red_flag_triggered:
-        action: SubscriptionAction = "PASS_SUBSCRIPTION"
-    elif edge == "UNFAVORABLE":
-        action = "PASS_AND_REASSESS_AFTER_LISTING" if watchworthy else "PASS_SUBSCRIPTION"
+    # Gates, not points — fixed order, first match wins; see module
+    # docstring for why each branch exists and what it protects
+    # against.
+    action: SubscriptionAction
+    if missing:
+        action = "CANNOT_ASSESS_SUBSCRIPTION"
+    elif red_flag_triggered:
+        action = "PASS_SUBSCRIPTION"
     elif window_closed:
         action = "PASS_AND_REASSESS_AFTER_LISTING" if watchworthy else "PASS_SUBSCRIPTION"
-    else:
+    elif subscription_edge == "UNFAVORABLE":
+        action = "PASS_AND_REASSESS_AFTER_LISTING" if watchworthy else "PASS_SUBSCRIPTION"
+    elif mechanics_state == "CONSTRAINED":
+        # A thin retail tranche is a real capacity constraint, but not
+        # by itself "clearly unfavorable evidence" — WATCH, not PASS.
+        action = "WATCH_SUBSCRIPTION"
+    elif subscription_edge == "FAVORABLE":
         action = "SUBSCRIBE_WITH_HOLD_OPTION" if ownership_view == "HOLD_CANDIDATE" else "SUBSCRIBE_FOR_LISTING_TRADE"
+    else:
+        # Resolved terms, no blocker, mechanics not prohibitive — but
+        # subscription_edge is NEUTRAL or UNKNOWN: resolved mechanics
+        # alone must never manufacture a SUBSCRIBE signal.
+        action = "WATCH_SUBSCRIPTION"
 
-    reasons = list(edge_reasons)
+    reasons: list[str] = []
+    if missing:
+        reasons.append(f"missing critical subscription evidence: {', '.join(missing)}")
+    reasons.extend(red_flag_reasons)
     if window_closed:
         reasons.append(f"subscription window already closed as of {inputs.as_of.date().isoformat()}")
-    if not red_flag_triggered and not reasons:
-        reasons.append("core subscription mechanics resolved with no red flags")
+    reasons.extend(edge_reasons)
+    reasons.extend(mechanics_reasons)
+    if financial_quality == "POSITIVE" and not valuation_anchor:
+        reasons.append(
+            "financial ratios are healthy, but no valuation anchor (e.g. a computable recalculated P/E) is "
+            "available from currently resolved pre-offer evidence — ownership capped at WATCH, not HOLD_CANDIDATE"
+        )
+    if not reasons:
+        reasons.append("core subscription mechanics resolved with no blockers, but no subscription edge is established")
+
+    strongest_positive = (
+        tuple(fin_positives)
+        + (mechanics_reasons if mechanics_state == "SUPPORTIVE" else ())
+        + (edge_reasons if subscription_edge == "FAVORABLE" else ())
+    )
+    strongest_risks = (
+        tuple(red_flag_reasons)
+        + tuple(fin_risks)
+        + (edge_reasons if subscription_edge == "UNFAVORABLE" else ())
+        + (mechanics_reasons if mechanics_state == "CONSTRAINED" else ())
+    )
 
     return SubscriptionDecisionV1(
         action=action,
-        subscription_edge=edge,
+        subscription_edge=subscription_edge,
+        mechanics_state=mechanics_state,
         intended_horizon=_HORIZON_BY_ACTION[action],
-        evidence_grade=evidence_grade,
+        subscription_evidence_grade=subscription_grade,
+        ownership_evidence_grade=ownership_grade,
+        financial_quality=financial_quality,
         ownership_view=ownership_view,
+        recent_ipo_regime=regime,
         allocation_scenarios=scenarios,
-        strongest_positive_evidence=ownership_positives,
-        strongest_risks=tuple(list(red_flag_reasons) + list(ownership_risks)),
-        missing_critical_evidence=(),
+        manually_confirmed_fields=manually_confirmed,
+        strongest_positive_evidence=strongest_positive,
+        strongest_risks=strongest_risks,
+        missing_critical_evidence=missing,
         reasons=tuple(reasons),
         rule_version=RULE_VERSION,
     )
@@ -382,10 +507,22 @@ def subscription_decision_as_dict(decision: SubscriptionDecisionV1) -> dict:
     return {
         "action": decision.action,
         "subscription_edge": decision.subscription_edge,
+        "mechanics_state": decision.mechanics_state,
         "intended_horizon": decision.intended_horizon,
-        "evidence_grade": decision.evidence_grade,
+        "subscription_evidence_grade": decision.subscription_evidence_grade,
+        "ownership_evidence_grade": decision.ownership_evidence_grade,
+        "financial_quality": decision.financial_quality,
         "ownership_view": decision.ownership_view,
+        "recent_ipo_regime": {
+            "status": decision.recent_ipo_regime.status,
+            "mature_ipo_count": decision.recent_ipo_regime.mature_ipo_count,
+            "median_bist_relative_return_5d": decision.recent_ipo_regime.median_bist_relative_return_5d,
+            "positive_bist_relative_share_5d": decision.recent_ipo_regime.positive_bist_relative_share_5d,
+            "window_days": decision.recent_ipo_regime.window_days,
+            "included_tickers": list(decision.recent_ipo_regime.included_tickers),
+        },
         "allocation_scenarios": [allocation_scenario_as_dict(s) for s in decision.allocation_scenarios],
+        "manually_confirmed_fields": list(decision.manually_confirmed_fields),
         "strongest_positive_evidence": list(decision.strongest_positive_evidence),
         "strongest_risks": list(decision.strongest_risks),
         "missing_critical_evidence": list(decision.missing_critical_evidence),
@@ -398,6 +535,8 @@ __all__ = [
     "DEFAULT_ALLOCATION_SCENARIO_PARTICIPANT_COUNTS",
     "RULE_VERSION",
     "EvidenceGrade",
+    "FinancialQuality",
+    "MechanicsState",
     "OwnershipView",
     "SubscriptionAction",
     "SubscriptionDecisionInputs",

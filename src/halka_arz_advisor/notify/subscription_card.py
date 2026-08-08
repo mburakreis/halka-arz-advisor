@@ -34,16 +34,29 @@ MAX_RISK_ITEMS = 3
 MAX_MESSAGE_CHARS = 3900
 
 _ACTION_LABELS_TR: dict[str, str] = {
-    "SUBSCRIBE_FOR_LISTING_TRADE": "Katıl (halka arz günü sat)",
+    "SUBSCRIBE_FOR_LISTING_TRADE": "Katıl (kısa vadeli işlem)",
     "SUBSCRIBE_WITH_HOLD_OPTION": "Katıl (tutma seçeneğiyle)",
+    "WATCH_SUBSCRIPTION": "İzle — henüz net bir avantaj yok",
     "PASS_SUBSCRIPTION": "Katılma",
     "PASS_AND_REASSESS_AFTER_LISTING": "Katılma — işlem görmeye başladıktan sonra yeniden değerlendir",
     "CANNOT_ASSESS_SUBSCRIPTION": "Değerlendirilemiyor — eksik bilgi",
 }
 _EDGE_LABELS_TR: dict[str, str] = {
-    "FAVORABLE": "Olumlu",
+    "FAVORABLE": "Olumlu (yakın dönem halka arzları)",
+    "NEUTRAL": "Nötr (yakın dönem halka arzları)",
+    "UNFAVORABLE": "Olumsuz (yakın dönem halka arzları)",
+    "UNKNOWN": "Bilinmiyor — yeterli karşılaştırma yok",
+}
+_MECHANICS_LABELS_TR: dict[str, str] = {
+    "SUPPORTIVE": "Destekleyici",
     "NEUTRAL": "Nötr",
-    "UNFAVORABLE": "Olumsuz",
+    "CONSTRAINED": "Kısıtlı",
+    "UNKNOWN": "Bilinmiyor",
+}
+_FINANCIAL_QUALITY_LABELS_TR: dict[str, str] = {
+    "POSITIVE": "Olumlu",
+    "MIXED": "Karışık",
+    "NEGATIVE": "Olumsuz",
     "UNKNOWN": "Bilinmiyor",
 }
 _OWNERSHIP_LABELS_TR: dict[str, str] = {
@@ -59,8 +72,9 @@ _EVIDENCE_GRADE_LABELS_TR: dict[str, str] = {
     "NONE": "Yok",
 }
 _HORIZON_LABELS_TR: dict[str, str] = {
-    "listing_day_flip": "Halka arz günü satış",
-    "flip_or_hold": "Sat ya da tut",
+    "5D_LISTING_TRADE": "İlk 5 işlem günü (kesin bir çıkış garantisi değildir)",
+    "5D_LISTING_TRADE_OR_HOLD": "İlk 5 işlem günü ya da tutma",
+    "watch_pending_edge": "Şartlar tamam, avantaj netleşene kadar izle",
     "watch_post_listing": "İşlem görmeye başladıktan sonra izle",
     "not_applicable": "Uygulanamaz",
 }
@@ -139,6 +153,17 @@ def _format_allocation_scenario(scenario: AllocationScenario) -> str:
     return f"  • {count_str} katılımcı varsayımı: {range_str}{tl_str}"
 
 
+def _format_recent_ipo_regime(decision: SubscriptionDecisionV1) -> list[str]:
+    regime = decision.recent_ipo_regime
+    lines = ["", "Yakın dönem halka arz rejimi (subscription_edge'in tek kaynağı):"]
+    lines.append(f"  • Olgun karşılaştırma sayısı: {regime.mature_ipo_count} (son {regime.window_days} gün)")
+    if regime.median_bist_relative_return_5d is not None:
+        lines.append(f"  • Medyan 5g BIST-göreli getiri: %{regime.median_bist_relative_return_5d:.1f}")
+    if regime.positive_bist_relative_share_5d is not None:
+        lines.append(f"  • Pozitif 5g BIST-göreli getiri oranı: %{regime.positive_bist_relative_share_5d * 100:.0f}")
+    return lines
+
+
 def _format_market_context(market: MarketContextSnapshot | None) -> list[str]:
     if market is None:
         return []
@@ -185,9 +210,16 @@ def format_subscription_card(
 
     lines.append(f"Beklenen ufuk: {_HORIZON_LABELS_TR.get(decision.intended_horizon, decision.intended_horizon)}")
     lines.append(
-        f"Talep koşulları: {_EDGE_LABELS_TR.get(decision.subscription_edge, decision.subscription_edge)}  |  "
-        f"Sahiplik görünümü: {_OWNERSHIP_LABELS_TR.get(decision.ownership_view, decision.ownership_view)}  |  "
-        f"Kanıt derecesi: {_EVIDENCE_GRADE_LABELS_TR.get(decision.evidence_grade, decision.evidence_grade)}"
+        f"Talep avantajı: {_EDGE_LABELS_TR.get(decision.subscription_edge, decision.subscription_edge)}  |  "
+        f"Arz mekaniği: {_MECHANICS_LABELS_TR.get(decision.mechanics_state, decision.mechanics_state)}"
+    )
+    lines.append(
+        f"Finansal kalite: {_FINANCIAL_QUALITY_LABELS_TR.get(decision.financial_quality, decision.financial_quality)}  |  "
+        f"Sahiplik görünümü: {_OWNERSHIP_LABELS_TR.get(decision.ownership_view, decision.ownership_view)}"
+    )
+    lines.append(
+        f"Kanıt derecesi — talep: {_EVIDENCE_GRADE_LABELS_TR.get(decision.subscription_evidence_grade, decision.subscription_evidence_grade)}  |  "
+        f"sahiplik: {_EVIDENCE_GRADE_LABELS_TR.get(decision.ownership_evidence_grade, decision.ownership_evidence_grade)}"
     )
 
     # Display the *effective* view (automatic where resolved, else a
@@ -206,9 +238,11 @@ def format_subscription_card(
 
     if decision.allocation_scenarios:
         lines.append("")
-        lines.append("Tahsisat senaryoları (varsayımsal katılımcı sayısına göre):")
+        lines.append("Tahsisat senaryoları (varsayımsal katılımcı sayıları — bir talep tahmini değildir):")
         for scenario in decision.allocation_scenarios:
             lines.append(_format_allocation_scenario(scenario))
+
+    lines.extend(_format_recent_ipo_regime(decision))
 
     if decision.reasons:
         lines.append("")

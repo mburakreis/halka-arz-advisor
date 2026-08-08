@@ -139,10 +139,10 @@ this catalog feature, which is why `subscription_window` is still only
 
 | Feature | Timing | Source | Avail (31) | Conflict | Extr. | Provenance reliable | Deterministic-ready | Dominant unavailable reason | Class |
 |---|---|---|---|---|---|---|---|---|---|
-| sector_classification | P | kap_extraction.sector_code | 0 (0%) | 0 | none | n/a | No | **no extractor for this catalog field — but `kap.sector.classify_sector` already exists, is deterministic (name-based), and is already used internally** for NOT_APPLICABLE gating on financial ratios. Pure wiring gap. | EXTRACTION_FRAGILE (near-zero-cost fix) |
+| sector_classification | P | kap_extraction.sector_code | 0 (0%) | 0 | none | n/a | No | **no extractor for this catalog field — but `kap.sector.classify_sector` already exists, is deterministic (name-based), and is already used internally** for NOT_APPLICABLE gating on financial ratios. Pure wiring gap. | ~~EXTRACTION_FRAGILE~~ → **wired, now `RELIABLE_NOW` — see "Update" section below** |
 | peer_group_comparables | P | market_data (unimplemented) | 0 (0%) | 0 | — | n/a | No | no external market-data source is implemented — genuine gap, no free official cross-company feed integrated | SOURCE_LIMITED |
-| broader_index_level_at_offer | P | market_data (unimplemented) | 0 (0%) | 0 | — | n/a | No | **the underlying BIST-100 index-level data this feature would need is already flowing through EVDS and populating `bist100_return_*` below — this specific feature_id was just never wired to it.** Not a true source limitation. | SOURCE_LIMITED (mislabeled — see synthesis §4) |
-| recent_comparable_ipo_performance | P | market_data (unimplemented) | 0 (0%) | 0 | — | n/a | No | needs a cross-company comparison this project doesn't compute — **but `ipo_outcomes` already computes exactly this per-company** (first_day/5d/20d/3m returns for every completed IPO); only the cross-company "recent peers" aggregation is missing, not the underlying data | SOURCE_LIMITED (mislabeled — see synthesis §4) |
+| broader_index_level_at_offer | P | market_data (unimplemented) | 0 (0%) | 0 | — | n/a | No | **the underlying BIST-100 index-level data this feature would need is already flowing through EVDS and populating `bist100_return_*` below — this specific feature_id was just never wired to it.** Not a true source limitation. | ~~SOURCE_LIMITED~~ → **wired, now `RELIABLE_NOW` — see "Update" section below** |
+| recent_comparable_ipo_performance | P | market_data (unimplemented) | 0 (0%) | 0 | — | n/a | No | needs a cross-company comparison this project doesn't compute — **but `ipo_outcomes` already computes exactly this per-company** (first_day/5d/20d/3m returns for every completed IPO); only the cross-company "recent peers" aggregation is missing, not the underlying data | SOURCE_LIMITED — **deliberately left unwired**, see "Update" section (this is `pre_offer`-timed but `ipo_outcomes` is a post-offer result; wiring it would leak post-offer knowledge into an entry-decision feature, which the follow-up pass was explicitly told never to do) |
 | application_pipeline_status | P | spk_application (structured API) | 1 (3.2%) | 0 | api | High | Yes, when relevant | most of this cohort has *already completed* its IPO, so an application record is structurally moot for them — not a real gap for the completed-IPO measurement, it would show high coverage for actual pending applications | USABLE_WITH_MISSINGNESS |
 | bist100_return_20d | P (macro) | EVDS (structured API) | 31 (100%) | 0 | api | **High** | **Yes** | — | RELIABLE_NOW |
 | bist100_return_60d | P (macro) | EVDS | 31 (100%) | 0 | api | High | Yes | — | RELIABLE_NOW |
@@ -175,7 +175,7 @@ this catalog feature, which is why `subscription_window` is still only
 | retail_investor_demand_signal | X | kap_extraction | 2 (6.5%) | 2/9 (22%) | 0 | pdf | Low | No | not found / doc not readable | POST_OFFER_ONLY |
 | institutional_investor_demand_signal | X | kap_extraction | 0 (0%) | — | 0 | none | n/a | No | **no extractor implemented** | POST_OFFER_ONLY |
 | analyst_or_broker_commentary_presence | P | kap_document (price_determination_review) | 0 (0%) | — | 0 | — | n/a | No | this document type is **deliberately excluded from the fetch pipeline's target document types** (`kap.classification.target_document_types`) — untested whether brokers actually file it, not a confirmed source absence | SOURCE_LIMITED (scope exclusion, not confirmed absence) |
-| post_ipo_price_performance_signal | X | market_data (unimplemented) | 0 (0%) | — | 0 | — | n/a | No | **`ipo_outcomes.first_day_return`/`return_5d/20d/3m` already compute exactly this, for 29/29 completed IPOs in the outcomes store — this catalog feature was simply never wired to it.** | POST_OFFER_ONLY (mislabeled — see synthesis §4) |
+| post_ipo_price_performance_signal | X | market_data (unimplemented) | 0 (0%) | — | 0 | — | n/a | No | **`ipo_outcomes.first_day_return`/`return_5d/20d/3m` already compute exactly this, for 29/29 completed IPOs in the outcomes store — this catalog feature was simply never wired to it.** | POST_OFFER_ONLY — **deliberately left unwired**, see "Update" section (`ipo_outcomes` must remain a retrospective label, never a decision input, regardless of its own timing) |
 
 ### data_confidence
 
@@ -289,18 +289,20 @@ ranked by value-for-effort:
    - **Near-zero cost, real value — wiring, not new extraction:**
      `sector_classification` (an existing deterministic name-based
      classifier, `kap.sector.classify_sector`, is already used
-     internally but was never exposed as this catalog fact),
+     internally but was never exposed as this catalog fact) and
      `broader_index_level_at_offer` (the same EVDS BIST-100 series
      already powering `bist100_return_*` was never also exposed at this
-     feature_id), and `post_ipo_price_performance_signal`/
-     `recent_comparable_ipo_performance` (the already-validated
-     `ipo_outcomes` module computes exactly this per-company and,
-     with a small cross-company aggregation, could compute the peer
-     comparison too — currently the catalog instead resolves these
-     through an unimplemented `market_data.*` path that will never
-     succeed). None of these need a new source, a new regex, or OCR
-     work — they need a resolver in `decision/audit.py` pointed at data
-     this project already has.
+     feature_id) — **both wired in the same-day follow-up pass below,
+     now `RELIABLE_NOW`, 100% coverage.** `post_ipo_price_performance_signal`/
+     `recent_comparable_ipo_performance` were *also* flagged here
+     originally as "the data already exists in `ipo_outcomes`" — on
+     reflection (and per explicit instruction in the follow-up pass)
+     that framing was wrong: `ipo_outcomes` is post-offer *outcome*
+     data, and wiring it into either feature — one of which is
+     `pre_offer`-timed — would leak post-offer knowledge into an
+     entry-decision input. These two remain open, and are **not** the
+     same zero-cost class as the two that were wired; see the "Update"
+     section below for what closing them would actually require.
    - **Moderate cost, moderate value:** a `business_description`
      extractor (confirmed to have zero implementation, unlike every
      other `fundamental_quality` presence field, which at least attempt
@@ -326,3 +328,145 @@ ranked by value-for-effort:
      source IPO-results notice itself is only recovered for 29% of
      companies to begin with — document acquisition would need to
      improve first for a new extractor here to matter).
+
+## Update: closed the near-zero-cost wiring gaps (same day, follow-up to `8f2888c`)
+
+Wired the two §4 "near-zero cost, real value" findings that had an
+*existing* catalog entry to attach to (no new `FeatureSpec` was added —
+see below for why the third finding, `ipo_outcomes`-backed features,
+was explicitly **not** wired). No extractor, scoring weight, threshold,
+category definition, or coverage gate was touched.
+
+**`sector_classification`** (`decision/catalog.py`, `market_context`,
+mandatory): `required_source_fields` changed from
+`("kap_extraction.sector_code",)` — a field with no extractor — to a
+new `("kap_sector.classification",)`, resolved by a new
+`decision/audit.py::_resolve_kap_sector_field`, which reads
+`CompanyDecisionInputs.sector` — already `kap.sector.classify_sector`
+applied to the same company-name resolution every other part of the
+audit already used internally for `SECTOR_INAPPLICABLE_METRICS` gating.
+No new extraction logic; one new resolver dispatch entry.
+
+**`broader_index_level_at_offer`** (`decision/catalog.py`,
+`market_context`, optional): its `required_source_fields`
+(`market_data.bist_index_level`) was already correctly named — nothing
+was populating that key. `evds/features.py::build_market_context_snapshot`
+now also computes it via the pre-existing `latest_value()` helper (the
+same one already used for `policy_rate`/`tlref_rate`) applied to the
+same `bist100_index` series already powering `bist100_return_20d/60d/120d`
+— one new `if` block, no new series, no new fetch.
+
+### Leakage-safety verification (offline, no live KAP call needed)
+
+`historical_dataset.filtering.market_context_as_of` already slices
+`bist100_index` to `observation_date <= cutoff_date` before calling
+`build_market_context_snapshot` — since the new feature reuses that same
+sliced input, it inherited cutoff-safety automatically, with no change
+needed in `historical_dataset` at all. Verified directly against the
+real cached EVDS series (`data/cache/evds`, cached through 2026-08-06)
+and the 12 real historical cutoffs already resolved in
+`data/cache/historical_dataset/v1/dataset.jsonl`: for every one, the
+resolved `bist_index_level.as_of_date` matches its own cutoff date
+exactly, never later — e.g. `QUICK` cutoff `2026-07-31` →
+`as_of_date=2026-07-31` (not `2026-08-06`, despite the cache holding
+five more weeks of data). `sector_classification` needs no cutoff logic
+at all (company legal name doesn't change across the offering; this
+exact company-name flow already predated this change) — cross-checked
+`kap.sector.classify_sector` offline against all 29 real cached company
+names, all classify as expected (4 REITs, 1 insurer `QUICK`, 24
+`standard`).
+
+A live rerun of `scripts/build_historical_ipo_dataset.py` to double-check
+end-to-end was attempted but hit KAP's rate limit (HTTP 429, from this
+session's earlier live audit runs) partway through an unrelated code
+path (`post_offer_evidence`'s cutoff-tier-2/3 attachment fetch) — not
+something this change touches. The offline verification above is the
+stronger check for this specific property anyway (it directly compares
+`as_of_date` against real historical cutoffs against a cache that
+provably contains post-cutoff data, which a live rerun wouldn't add).
+
+### Re-run capability audit results (same 31-company cohort, `scripts/audit_capability_report.py`)
+
+| Feature | Before | After | Conflicts | New class |
+|---|---|---|---|---|
+| `sector_classification` | 0/31 (0%) | **31/31 (100%)** | 0 | `RELIABLE_NOW` |
+| `broader_index_level_at_offer` | 0/31 (0%) | **31/31 (100%)** | 0 | `RELIABLE_NOW` |
+
+Every other one of the 66 catalog features' `available_count` is
+byte-for-byte unchanged (diffed programmatically against the
+pre-wiring JSON snapshot) — this was a purely additive, isolated change.
+Both newly-wired features are outside every `expert_v0`-scored category
+(confirmed in `scoring_config.py`: the 17 scored features span only
+`fundamental_quality`/`valuation`/`offering_structure`), so `expert_v0`'s
+`total_score`, `confidence_score`, category coverage gates, and the
+historical cohort's decision signals (still 0/9 usable, per the
+unresolved `fundamental_quality`/`valuation` gaps documented above) are
+**provably unchanged** by this pass — not just "not intended to
+change," but structurally incapable of changing, since neither feature
+appears in any scored category's feature list.
+
+### Which reliable existing data is still unused
+
+- **`bist100_volume`** — an EVDS series this project already fetches
+  and caches (`evds/registry.py`, `TP.MK.ISL.HC`, alongside
+  `bist100_index`) but `build_market_context_snapshot` has never
+  computed anything from it, and no catalog feature references it.
+  Genuinely idle, reliable, already-cached data — but there is no
+  existing catalog entry to wire it into (unlike the two features
+  above), so adding one was out of scope for this pass (would be a new
+  feature, not a wiring fix).
+- **Most of `SpkIpoRecord`'s remaining fields** (`halka_arz_orani`,
+  `ortak_satis_bin_tl`, `nakit_sermaye_artisi_bin_tl`,
+  `satisa_hazir_bekletilen_pay_tutari_bin_tl`,
+  `satisa_sunulan_toplam_tutar_bin_tl`/`_bin_abd_dolari`,
+  `mevcut_sermaye_bin_tl`, `yeni_sermaye_bin_tl`, `halka_arz_sekli`,
+  `halka_arz_fiyati_tl`) — inspected all 19 fields on the model.
+  4 were already wired pre-existing (`post_offer_market_value_of_offering`,
+  `over_allotment_greenshoe_amount`, `lead_intermediary_institution`,
+  `listing_market_segment`), 2 are already used by `ipo_outcomes`
+  (`halka_arz_fiyati_tl`, `borsada_islem_gorme_tarihi` — correctly, as
+  retrospective-label inputs, not decision features). The other 9 are
+  each the **post-offer, SPK-published counterpart of an existing
+  pre_offer catalog feature** — e.g. `halka_arz_fiyati_tl` vs.
+  `offering_price`, `halka_arz_orani` vs. `capital_increase_ratio`,
+  `ortak_satis_bin_tl` vs. `secondary_sale_shares`/`secondary_sale_ratio`,
+  `halka_arz_sekli` vs. `distribution_method`. Wiring any of these into
+  their pre-offer sibling feature would be exactly the leakage this
+  task's brief explicitly forbids ("do not use post-offer SPK/KAP
+  knowledge as historical entry features unless independently proven
+  available by the cutoff") — SPK only publishes `IlkHalkaArzVerileriBilgi`
+  once the offering is complete, so none of these 9 are available by
+  any pre-offer cutoff. Deliberately left unwired.
+- **`ipo_outcomes`'s full return/drawdown/relative-performance series**
+  (97-100% coverage for `first_day_return`/`return_5d` across 29
+  companies, already validated against a real baseline bug in a prior
+  session) remains, per this task's explicit instruction, retrospective-label-only
+  — not wired into `post_ipo_price_performance_signal` or
+  `recent_comparable_ipo_performance` despite both being flagged in the
+  original audit as "the data already exists." Closing those two
+  specifically would need either a genuinely new external peer-multiples
+  feed (`peer_group_comparables`) or a new cross-company as-of-cutoff
+  aggregation layer (for `recent_comparable_ipo_performance` — "which
+  *other* IPOs had already priced and started trading, as of *this*
+  IPO's own cutoff" is a real, unbuilt capability, not a simple wire),
+  not the same zero-cost pattern as `sector_classification`/
+  `broader_index_level_at_offer`. Left as an open, correctly-scoped-out
+  gap.
+
+### `expert_v0` requirements still fundamentally mismatched with real data availability
+
+Unchanged by this pass, since neither wired feature is scored:
+`fundamental_quality` (50% of `total_score`) still has two
+zero-extractor presence fields (`business_description`,
+`related_party_transactions_disclosure`/`litigation_exposure_disclosure`
+are catalog-only, not scored, but the same "no extractor" pattern
+recurs in scored `business_description`) and near-zero conditional
+financial-ratio coverage; `valuation` (30%) still has
+`headline_discount_percentage`/`earnings_multiple_at_offer` at
+44%/11% conditional; `offering_structure` (20%) still has
+`subscription_window`/`distribution_method` weak for the same reason
+documented above (the cutoff-regex fixes intentionally never reach this
+catalog field). The historical cohort's `expert_v0` decisions remain
+0/9 usable. This pass improved the coverage *audit*'s honesty and
+completeness, not `expert_v0`'s own scored inputs — exactly the scope
+the task asked for.

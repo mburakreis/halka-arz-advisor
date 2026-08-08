@@ -42,7 +42,17 @@ which existing model they'd read from:
   docstring for exactly what "incompatible" means per feature).
 - ``market_data.<name>`` — no corresponding model exists in this
   project at all (a genuine, currently out-of-scope data source, e.g.
-  a peer/index feed) — always evaluates to ``MISSING_DOCUMENT``.
+  a peer/index feed) — always evaluates to ``MISSING_DOCUMENT``, *except*
+  the handful of names that
+  :func:`halka_arz_advisor.evds.features.build_market_context_snapshot`
+  actually populates (see the market_context block below), which
+  resolve from ``CompanyDecisionInputs.market_context`` instead.
+- ``kap_sector.classification`` — not a field on any model; wires
+  :attr:`halka_arz_advisor.decision.audit.CompanyDecisionInputs.sector`
+  (:func:`halka_arz_advisor.kap.sector.classify_sector`, a deterministic,
+  name-based classifier already used internally for
+  ``SECTOR_INAPPLICABLE_METRICS`` gating) into the catalog directly —
+  not a new extractor, just exposing an already-computed value.
 
 A ``derived`` feature has no ``required_source_fields`` of its own; it
 reads its ``derivation_dependencies`` (other ``feature_id``s) instead
@@ -499,8 +509,8 @@ FEATURE_CATALOG: tuple[FeatureSpec, ...] = (
         category="market_context",
         title="Sektör sınıflandırması",
         description="The issuer's industry/sector classification.",
-        required_source_fields=("kap_extraction.sector_code",),
-        acceptable_sources=_PROSPECTUS_AND_ANNOUNCEMENT,
+        required_source_fields=("kap_sector.classification",),
+        acceptable_sources=("approved_prospectus", "investor_sale_announcement", "spk_completed_ipo_record"),
         offer_timing="pre_offer",
         is_mandatory=True,
         availability_kind="direct",
@@ -520,9 +530,13 @@ FEATURE_CATALOG: tuple[FeatureSpec, ...] = (
         feature_id="broader_index_level_at_offer",
         category="market_context",
         title="Halka arz döneminde BIST endeks seviyesi",
-        description="Overall market conditions (index level/trend) during the subscription window.",
+        description=(
+            "Overall market conditions (index level/trend) during the subscription window — the latest "
+            "cached BIST-100 index level, from the same evds.features.build_market_context_snapshot series "
+            "that already powers bist100_return_20d/60d/120d below (not a separate, unimplemented feed)."
+        ),
         required_source_fields=("market_data.bist_index_level",),
-        acceptable_sources=("external_market_data_feed",),
+        acceptable_sources=("evds_market_data_feed",),
         offer_timing="pre_offer",
         is_mandatory=False,
         availability_kind="direct",
@@ -549,11 +563,13 @@ FEATURE_CATALOG: tuple[FeatureSpec, ...] = (
         is_mandatory=False,
         availability_kind="direct",
     ),
-    # The nine EVDS-derived market-context features below are populated
-    # only when halka_arz_advisor.decision.audit.CompanyDecisionInputs.market_context
+    # The nine EVDS-derived market-context features below (plus
+    # broader_index_level_at_offer above, which shares the same
+    # bist100_index series) are populated only when
+    # halka_arz_advisor.decision.audit.CompanyDecisionInputs.market_context
     # carries a snapshot (see halka_arz_advisor.evds.features) — a
     # company-agnostic macro snapshot shared across every company in a
-    # given run, not IPO-specific data. All nine are deliberately
+    # given run, not IPO-specific data. All ten are deliberately
     # non-mandatory and outside every scored category (fundamental_quality/
     # valuation/offering_structure) in scoring_config.py's expert_v0 —
     # this only extends the coverage *audit*, never total_score,

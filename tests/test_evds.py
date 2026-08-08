@@ -4,7 +4,7 @@ import pytest
 
 from halka_arz_advisor.evds.cache import EvdsCache
 from halka_arz_advisor.evds.config import load_evds_config_from_env
-from halka_arz_advisor.evds.features import bist100_max_drawdown, bist100_return, bist100_volatility
+from halka_arz_advisor.evds.features import bist100_max_drawdown, bist100_return, bist100_volatility, build_market_context_snapshot
 from halka_arz_advisor.evds.models import EvdsObservation
 from halka_arz_advisor.evds.parsing import parse_evds_items
 from halka_arz_advisor.evds.refresh import refresh_market_context
@@ -92,6 +92,20 @@ def test_bist100_return_volatility_and_drawdown_are_computed_from_trading_observ
     assert drawdown is not None
     # Peak 120 -> trough 80 is the worst decline: (80/120 - 1) * 100.
     assert drawdown.value == pytest.approx(-33.333333, rel=1e-6)
+
+
+def test_snapshot_exposes_bist_index_level_from_the_same_bist100_index_series():
+    # decision.catalog's broader_index_level_at_offer (market_data.bist_index_level)
+    # reads this key — it must be the plain latest cached level, not a
+    # window-relative return like the other bist100_* features.
+    snapshot = build_market_context_snapshot(
+        bist100_index=[_obs(date(2026, 1, 1), 100.0), _obs(date(2026, 1, 2), 105.0)],
+        policy_rate_observations=[], tlref_observations=[], cpi_observations=[],
+    )
+    level = snapshot.get("bist_index_level")
+    assert level is not None
+    assert level.value == pytest.approx(105.0)
+    assert level.as_of_date == date(2026, 1, 2)
 
 
 # --------------------------------------------------------------------------

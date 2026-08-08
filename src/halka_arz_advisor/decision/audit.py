@@ -363,6 +363,32 @@ def _resolve_derived_financial_field(
     )
 
 
+def _resolve_kap_sector_field(field_ref: str, inputs: CompanyDecisionInputs) -> tuple[FeatureStatus, FeatureEvidence]:
+    """``kap_sector.classification`` — wires :attr:`CompanyDecisionInputs.sector`
+    (already computed via :func:`halka_arz_advisor.kap.sector.classify_sector`,
+    already used internally for ``SECTOR_INAPPLICABLE_METRICS`` gating on
+    the financial-ratio features above) into the coverage catalog itself,
+    instead of leaving ``sector_classification`` permanently unresolvable.
+
+    Not a new extractor: ``classify_sector`` reads only the company's
+    registered legal name (from ``CompanyDecisionInputs.company_name`` or
+    a matched disclosure's own ``company_name`` field — never PDF
+    narrative text), which was already flowing into every audit via the
+    ``sector`` property before this feature existed. ``"unknown"`` is the
+    classifier's own signal for "no name was available at all"; any real
+    name — including one that matches no special pattern — resolves to a
+    genuine classification (``"standard"`` is not a failure state).
+    """
+    sector = inputs.sector
+    if sector == "unknown":
+        return "MISSING_DOCUMENT", FeatureEvidence(
+            field_name=field_ref, value=None, status="no company name available to classify (kap.sector.classify_sector)"
+        )
+    return "AVAILABLE", FeatureEvidence(
+        field_name=field_ref, value=sector, status="classify_sector (deterministic, name-based, no PDF text read)"
+    )
+
+
 def _resolve_market_data_field(field_ref: str, name: str, inputs: CompanyDecisionInputs) -> tuple[FeatureStatus, FeatureEvidence]:
     """Every ``market_data.<name>`` field except the nine EVDS-derived
     ones (see ``halka_arz_advisor.evds.features``) has no implemented
@@ -405,6 +431,8 @@ def _resolve_field(field_ref: str, inputs: CompanyDecisionInputs, acceptable_sou
         return _resolve_derived_financial_field(field_ref, name, inputs, acceptable_sources)
     if namespace == "market_data":
         return _resolve_market_data_field(field_ref, name, inputs)
+    if namespace == "kap_sector":
+        return _resolve_kap_sector_field(field_ref, inputs)
     raise ValueError(f"unrecognized required_source_fields namespace in {field_ref!r}")
 
 

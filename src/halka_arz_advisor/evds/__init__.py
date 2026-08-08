@@ -6,7 +6,7 @@ from here.
 Fetches and caches a handful of pinned, verified series (see
 :mod:`halka_arz_advisor.evds.registry`) — BIST 100 level and volume,
 TCMB's policy rate, BIST TLREF, and TÜİK's headline CPI — and derives
-nine deterministic market-context features from them (see
+ten deterministic market-context features from them (see
 :mod:`halka_arz_advisor.evds.features`). Requires ``EVDS_API_KEY`` in
 the environment; degrades gracefully (never raises, never blocks a
 caller) when it's absent or the service is unreachable — see

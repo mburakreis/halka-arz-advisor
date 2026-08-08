@@ -1,4 +1,4 @@
-"""Deterministic derivation of the nine market-context features this
+"""Deterministic derivation of the ten market-context features this
 project exposes to the decision coverage audit — pure arithmetic over
 already-cached :class:`~halka_arz_advisor.evds.models.EvdsObservation`
 sequences, no scoring/weighting/normalization and no network access.
@@ -137,11 +137,21 @@ def build_market_context_snapshot(
     tlref_observations: Sequence[EvdsObservation],
     cpi_observations: Sequence[EvdsObservation],
 ) -> MarketContextSnapshot:
-    """Compute every one of the nine market-context features this
+    """Compute every one of the ten market-context features this
     project currently exposes — see this module's docstring for why a
     feature is simply absent from the result rather than fabricated
     when there isn't enough cached data yet."""
     features: dict[str, MarketContextFeatureValue] = {}
+
+    # The same bist100_index series already used for the return/
+    # volatility/drawdown windows below, just read as a raw level
+    # instead of a window-relative change — feeds
+    # decision.catalog's broader_index_level_at_offer
+    # (market_data.bist_index_level), not a second series or a new
+    # extractor.
+    index_level_value = latest_value(bist100_index)
+    if index_level_value is not None:
+        features["bist_index_level"] = index_level_value
 
     for name, window in _RETURN_WINDOWS.items():
         value = bist100_return(bist100_index, window)

@@ -9,6 +9,7 @@ _VALID_NAMESPACES = (
     "financial_series",
     "derived_financial",
     "market_data",
+    "kap_sector",
 )
 
 

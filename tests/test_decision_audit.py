@@ -104,6 +104,24 @@ def test_derived_feature_propagates_missing_dependency():
     assert "total_offered_shares" in result.missing_dependencies
 
 
+def test_sector_classification_wires_to_classify_sector_deterministically():
+    # QUİCK SİGORTA A.Ş. (the _disclosure default) matches the insurance
+    # pattern in kap.sector.classify_sector — no kap_extraction field, no
+    # PDF text read, just the already-flowing company_name.
+    disclosures = (_disclosure(document_type="approved_prospectus"),)
+    result = _result(audit_company(_inputs(disclosures=disclosures)), "sector_classification")
+
+    assert result.status == "AVAILABLE"
+    sector_evidence = next(e for e in result.evidence if e.field_name == "kap_sector.classification")
+    assert sector_evidence.value == "insurance"
+    assert sector_evidence.disclosure_id is None  # not sourced from a specific document/page
+
+
+def test_sector_classification_missing_document_when_no_company_name_at_all():
+    result = _result(audit_company(_inputs()), "sector_classification")
+    assert result.status == "MISSING_DOCUMENT"
+
+
 def test_conflicted_preserves_both_observations():
     facts = build_extracted_facts(
         {"offering_price": FieldObservation(80.0, "80 TL", SRC_P)},

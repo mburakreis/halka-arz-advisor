@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import halka_arz_advisor.kap.ocr as ocr_module
-from halka_arz_advisor.kap.ocr import OcrCache, OcrConfig, get_tesseract_version, lookup_ocr_result, ocr_pdf
+from halka_arz_advisor.kap.ocr import OcrCache, OcrConfig, get_tesseract_version, lookup_ocr_result, ocr_pdf, ocr_pdf_extend
 
 
 class _FakeCompletedProcess:
@@ -240,3 +240,61 @@ def test_different_dpi_is_a_separate_cache_entry(monkeypatch, build_pdf_bytes, t
     ocr_pdf(pdf_bytes, config=fast_config(dpi=100), cache=cache)
     assert lookup_ocr_result(pdf_bytes, config=fast_config(dpi=200), cache=cache) is None
     assert lookup_ocr_result(pdf_bytes, config=fast_config(dpi=100), cache=cache) is not None
+
+
+# --------------------------------------------------------------------------
+# ocr_pdf_extend: deepen an already-OCR'd document without redoing pages
+# already cached (kap.allocation_ocr's scoped deep-OCR fallback)
+# --------------------------------------------------------------------------
+
+
+def test_ocr_pdf_extend_reuses_cached_pages_and_only_ocrs_the_new_ones(monkeypatch, build_pdf_bytes, tmp_path):
+    import io
+
+    import pypdfium2 as pdfium
+
+    one_page = pdfium.PdfDocument(build_pdf_bytes(with_image=True))
+    combined = pdfium.PdfDocument.new()
+    combined.import_pages(one_page, pages=[0, 0, 0, 0, 0])  # 5-page document
+    buf = io.BytesIO()
+    combined.save(buf)
+    five_page_pdf_bytes = buf.getvalue()
+
+    cache = OcrCache(tmp_path / "kap_ocr")
+    monkeypatch.setattr(
+        ocr_module.subprocess, "run", make_fake_run(per_page_text={"page-1": "sayfa bir", "page-2": "sayfa iki"})
+    )
+
+    shallow = ocr_pdf(five_page_pdf_bytes, config=fast_config(max_pages=2), cache=cache)
+    assert shallow.status == "ocr_partial"
+    assert shallow.processed_page_count == 2
+
+    def _fail_on_already_cached_pages(args, *, capture_output=True, timeout=None, **kwargs):
+        if args[:2] == ["tesseract", "--version"]:
+            return _FakeCompletedProcess(returncode=0, stdout=b"tesseract 5.5.1\n leptonica-1.86.0")
+        image_path = Path(args[1])
+        if image_path.stem in ("page-1", "page-2"):
+            raise AssertionError(f"{image_path.stem} was already cached by the shallow run and must not be re-OCR'd")
+        output_base = Path(args[2])
+        output_base.with_suffix(".txt").write_text(f"yeni metin {image_path.stem}", encoding="utf-8")
+        return _FakeCompletedProcess(returncode=0)
+
+    monkeypatch.setattr(ocr_module.subprocess, "run", _fail_on_already_cached_pages)
+
+    deepened = ocr_pdf_extend(five_page_pdf_bytes, config=fast_config(), cache=cache, target_page_count=5)
+
+    assert deepened.status == "ocr_ok"
+    assert deepened.processed_page_count == 5
+    assert deepened.total_page_count == 5
+    assert deepened.pages[0].text == "sayfa bir"  # reused from the shallow run's cache, not re-rendered/re-OCR'd
+    assert deepened.pages[1].text == "sayfa iki"
+    assert deepened.pages[2].text == "yeni metin page-3"
+    assert deepened.pages[4].text == "yeni metin page-5"
+
+    # The manifest was extended (not left at the shallow processed_page_count
+    # of 2), so a later plain ocr_pdf()/lookup_ocr_result() call against the
+    # same document transparently benefits from the deeper scan too.
+    looked_up = lookup_ocr_result(five_page_pdf_bytes, config=fast_config(), cache=cache)
+    assert looked_up is not None
+    assert looked_up.status == "ocr_ok"
+    assert looked_up.processed_page_count == 5

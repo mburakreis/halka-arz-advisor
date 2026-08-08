@@ -390,24 +390,43 @@ def _terms_with_equal_retail(retail_shares: float, offer_price: float | None = 4
     return build_offering_terms(facts, DISCLOSURES)
 
 
-def test_allocation_scenario_computes_lots_and_tl_for_equal_distribution():
+def test_allocation_scenario_computes_even_division_baseline_and_tl():
     terms = _terms_with_equal_retail(retail_shares=1_000_000.0, offer_price=45.0)
     scenario = build_allocation_scenario(terms, hypothetical_retail_participant_count=100_000)
 
     assert scenario.status == "computed"
-    assert scenario.lots_per_investor == 10.0
-    assert scenario.tl_allocation_per_investor == 450.0
+    assert scenario.average_shares_per_participant == 10.0
+    assert scenario.base_integer_allocation == 10
+    assert scenario.remainder_shares == 0
+    assert scenario.allocation_range_shares == (10, 10)
+    assert scenario.tl_allocation_baseline == 450.0
+    assert scenario.tl_allocation_range == (450.0, 450.0)
     assert scenario.assumptions  # non-empty: equal-distribution/lot-definition/order assumptions stated
-    assert not scenario.caveats
+    # a permanent caveat that participant count alone can't reproduce the real allocation is always present
+    assert any("cannot reproduce the actual final" in c for c in scenario.caveats)
 
 
-def test_allocation_scenario_lots_computed_but_tl_blocked_without_offer_price():
+def test_allocation_scenario_uneven_division_reports_floor_remainder_and_range():
+    # 1,000,000 shares over 300,000 hypothetical participants: floor = 3, remainder = 100,000
+    terms = _terms_with_equal_retail(retail_shares=1_000_000.0, offer_price=45.0)
+    scenario = build_allocation_scenario(terms, hypothetical_retail_participant_count=300_000)
+
+    assert scenario.status == "computed"
+    assert scenario.base_integer_allocation == 3
+    assert scenario.remainder_shares == 100_000
+    assert scenario.allocation_range_shares == (3, 4)
+    assert scenario.tl_allocation_baseline == 135.0
+    assert scenario.tl_allocation_range == (135.0, 180.0)
+
+
+def test_allocation_scenario_baseline_computed_but_tl_blocked_without_offer_price():
     terms = _terms_with_equal_retail(retail_shares=1_000_000.0, offer_price=None)
     scenario = build_allocation_scenario(terms, hypothetical_retail_participant_count=100_000)
 
     assert scenario.status == "computed"
-    assert scenario.lots_per_investor == 10.0
-    assert scenario.tl_allocation_per_investor is None
+    assert scenario.base_integer_allocation == 10
+    assert scenario.tl_allocation_baseline is None
+    assert scenario.tl_allocation_range is None
     assert any("offer_price" in c for c in scenario.caveats)
 
 
@@ -428,7 +447,7 @@ def test_allocation_scenario_unavailable_when_distribution_rule_is_proportional(
     scenario = build_allocation_scenario(terms, hypothetical_retail_participant_count=100_000)
 
     assert scenario.status == "unavailable"
-    assert scenario.lots_per_investor is None
+    assert scenario.base_integer_allocation is None
     assert any("proportional" in c for c in scenario.caveats)
 
 
@@ -437,7 +456,7 @@ def test_allocation_scenario_unavailable_when_distribution_rule_not_found():
     scenario = build_allocation_scenario(terms, hypothetical_retail_participant_count=100_000)
 
     assert scenario.status == "unavailable"
-    assert scenario.lots_per_investor is None
+    assert scenario.base_integer_allocation is None
     assert scenario.caveats
 
 

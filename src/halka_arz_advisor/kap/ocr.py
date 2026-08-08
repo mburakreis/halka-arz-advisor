@@ -372,3 +372,165 @@ def ocr_pdf(pdf_bytes: bytes, *, config: OcrConfig, cache: OcrCache | None = Non
         )
 
     return result
+
+
+def ocr_pdf_extend(pdf_bytes: bytes, *, config: OcrConfig, cache: OcrCache, target_page_count: int) -> OcrResult:
+    """Ensure pages ``1..min(total_page_count, target_page_count)`` of
+    ``pdf_bytes`` are OCR'd, going *deeper* into a document than
+    :func:`ocr_pdf`'s own ``config.max_pages`` budget without redoing
+    any page already OCR'd.
+
+    :class:`OcrCache`'s per-page entries (:meth:`OcrCache.get_page_text`/
+    :meth:`put_page_text`) are keyed by ``(content_hash, page_number,
+    languages, dpi)`` — never by how many pages a given run asked for —
+    so this reuses any page already cached by an earlier, shallower
+    :func:`ocr_pdf`/:func:`ocr_pdf_extend` call and only renders+OCRs
+    pages that are genuinely still missing. This is the one thing
+    :func:`ocr_pdf` itself can't do: its own manifest-based
+    :func:`lookup_ocr_result` short-circuit returns whatever was cached
+    *first*, regardless of ``config.max_pages``, so simply calling
+    :func:`ocr_pdf` again with a larger ``max_pages`` against an
+    already-manifested document would silently keep returning the old,
+    shallower result forever.
+
+    The manifest for ``(content_hash, languages, dpi)`` is updated to
+    the deeper ``processed_page_count`` reached here (never regressed to
+    a shallower one) — so a plain :func:`ocr_pdf`/:func:`lookup_ocr_result`
+    call against the same document afterward transparently benefits from
+    the deeper scan too. This is a deliberate, documented trade-off: the
+    *global* :data:`DEFAULT_MAX_PAGES`/``OCR_MAX_PAGES`` default this
+    project uses everywhere else is never changed by calling this
+    function, but a specific document this function has already deep-
+    scanned once stays deep-scanned for every future consumer, for free
+    — exactly the "persist the additional OCR work so repeated runs are
+    cheap" property a scoped, on-demand fallback needs (see
+    :mod:`halka_arz_advisor.kap.allocation_ocr`, the one caller of this
+    function today).
+
+    Never raises, same failure-reporting convention as :func:`ocr_pdf`.
+    """
+    if not config.enabled:
+        return OcrResult(
+            status="ocr_unavailable",
+            pages=(),
+            warnings=("OCR is disabled (OCR_ENABLED=false)",),
+            processed_page_count=0,
+            total_page_count=0,
+            languages=config.languages,
+            engine_version=None,
+        )
+
+    engine_version = get_tesseract_version()
+    if engine_version is None:
+        return OcrResult(
+            status="ocr_unavailable",
+            pages=(),
+            warnings=("tesseract CLI not found on PATH",),
+            processed_page_count=0,
+            total_page_count=0,
+            languages=config.languages,
+            engine_version=None,
+        )
+
+    content_hash = hashlib.sha256(pdf_bytes).hexdigest()
+
+    try:
+        pdf_document = pdfium.PdfDocument(pdf_bytes)
+    except Exception as exc:  # noqa: BLE001 - pypdfium2's own error types vary by failure mode
+        return OcrResult(
+            status="ocr_failed",
+            pages=(),
+            warnings=(f"could not open PDF for rendering: {exc}",),
+            processed_page_count=0,
+            total_page_count=0,
+            languages=config.languages,
+            engine_version=engine_version,
+        )
+
+    try:
+        total_page_count = len(pdf_document)
+        pages_to_process = min(total_page_count, target_page_count)
+        is_page_limited = total_page_count > target_page_count
+
+        pages: list[PdfPage] = []
+        warnings: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            for page_index in range(pages_to_process):
+                page_number = page_index + 1
+
+                cached_text = cache.get_page_text(content_hash, page_number, languages=config.languages, dpi=config.dpi)
+                if cached_text is not None:
+                    pages.append(PdfPage(number=page_number, text=cached_text))
+                    continue
+
+                image_path = tmp_path / f"page-{page_number}.png"
+                try:
+                    _render_page_to_png(pdf_document, page_index, dpi=config.dpi, output_path=image_path)
+                except Exception as exc:  # noqa: BLE001 - one broken page shouldn't fail the whole document
+                    warnings.append(f"page {page_number}: failed to render: {exc}")
+                    continue
+
+                try:
+                    text = _ocr_image(
+                        image_path,
+                        tmp_path / f"page-{page_number}",
+                        languages=config.languages,
+                        timeout_seconds=config.timeout_seconds,
+                    )
+                except subprocess.TimeoutExpired:
+                    warnings.append(f"page {page_number}: OCR timed out after {config.timeout_seconds}s")
+                    continue
+                except TesseractUnavailableError:
+                    warnings.append(f"page {page_number}: tesseract CLI not found")
+                    continue
+                except Exception as exc:  # noqa: BLE001 - one broken page shouldn't fail the whole document
+                    warnings.append(f"page {page_number}: OCR failed: {exc}")
+                    continue
+
+                pages.append(PdfPage(number=page_number, text=text))
+                cache.put_page_text(content_hash, page_number, languages=config.languages, dpi=config.dpi, text=text)
+    finally:
+        pdf_document.close()
+
+    if is_page_limited:
+        warnings.append(
+            f"document has {total_page_count} page(s); only the first {pages_to_process} "
+            f"(target_page_count={target_page_count}) were OCR'd"
+        )
+
+    if not pages:
+        status: OcrStatus = "ocr_failed"
+    elif is_page_limited or len(pages) < pages_to_process:
+        status = "ocr_partial"
+    else:
+        status = "ocr_ok"
+
+    result = OcrResult(
+        status=status,
+        pages=tuple(pages),
+        warnings=tuple(warnings),
+        processed_page_count=pages_to_process,
+        total_page_count=total_page_count,
+        languages=config.languages,
+        engine_version=engine_version,
+    )
+
+    existing_manifest = cache.get_manifest(content_hash, languages=config.languages, dpi=config.dpi)
+    if existing_manifest is None or existing_manifest.get("processed_page_count", 0) <= result.processed_page_count:
+        cache.put_manifest(
+            content_hash,
+            languages=config.languages,
+            dpi=config.dpi,
+            manifest={
+                "status": result.status,
+                "warnings": list(result.warnings),
+                "processed_page_count": result.processed_page_count,
+                "total_page_count": result.total_page_count,
+                "languages": result.languages,
+                "engine_version": result.engine_version,
+            },
+        )
+
+    return result

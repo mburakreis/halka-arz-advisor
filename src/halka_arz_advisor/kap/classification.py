@@ -159,6 +159,33 @@ def classify_prospectus_document_role(summary: str, title: str = "") -> Prospect
     return "base_document"
 
 
+# "İzahname 1. Bölüm" .. "İzahname N. Bölüm" — see the module-level note
+# above ``PROSPECTUS_ATTACHMENT_KEYWORDS`` for why a base prospectus is
+# often split across several disclosures this way. Generic Turkish
+# ordinal-part phrasing, not a per-issuer pattern; also matches the
+# less common "N. Kısım" wording seen on a few real bundles.
+_PROSPECTUS_PART_NUMBER_RE = re.compile(r"(\d+)\s*\.\s*(?:bolum|kisim)\b")
+
+
+def extract_prospectus_part_number(summary: str, title: str = "") -> int | None:
+    """The part/bölüm ordinal of a base-document prospectus disclosure,
+    if its summary or title states one (e.g. ``"İzahname 3. Bölüm"`` ->
+    ``3``) — ``None`` if it's a single-part filing or a whole-document
+    correction/revision with no part number at all.
+
+    Used by :mod:`halka_arz_advisor.kap.allocation_ocr` to prioritize
+    which part of a multi-part bundle to deep-OCR first when looking for
+    a section (like the tahsisat/allocation table) that tends to sit
+    late in the whole document — the highest part number is the best
+    generic proxy for "closest to the end" this project has, not a
+    guarantee (a document's *sections* don't necessarily align with its
+    *filed parts*).
+    """
+    folded = fold_turkish(summary) or fold_turkish(title)
+    match = _PROSPECTUS_PART_NUMBER_RE.search(folded)
+    return int(match.group(1)) if match else None
+
+
 def classify_title(title: str) -> DocumentType:
     """Classify a disclosure title using substring matching on folded text."""
     normalized = fold_turkish(title)

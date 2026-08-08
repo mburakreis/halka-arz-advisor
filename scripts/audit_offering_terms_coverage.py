@@ -32,6 +32,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from halka_arz_advisor.kap.allocation_ocr import recover_allocation_sections  # noqa: E402
 from halka_arz_advisor.kap.backfill import merge_backfilled_disclosures  # noqa: E402
 from halka_arz_advisor.kap.backfill_cache import BackfillCache  # noqa: E402
 from halka_arz_advisor.kap.classification import target_document_types  # noqa: E402
@@ -59,6 +60,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--backfill-cache-dir", type=Path, default=PROJECT_ROOT / "data" / "cache" / "kap_backfill")
     parser.add_argument("--env-file", type=Path, default=PROJECT_ROOT / ".env")
     parser.add_argument("--out", type=Path, default=None, help="Write JSON report here instead of stdout")
+    parser.add_argument(
+        "--deep-ocr-allocation",
+        action="store_true",
+        help=(
+            "For any company still missing investor_group_allocations/retail_allocation_percentage/"
+            "retail_offered_shares, run halka_arz_advisor.kap.allocation_ocr's scoped deep-OCR fallback "
+            "(cache-only PDF bytes, no new KAP crawl) before reporting coverage. Off by default since it can "
+            "run real local Tesseract OCR for several minutes across a cohort with many scanned prospectuses."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -156,6 +167,19 @@ def main(argv: list[str] | None = None) -> int:
         disclosures = [d for d in disclosures_by_record[record_id] if d.document_type in pre_offer_types]
         facts = company_facts.get(record_id)
         terms = build_offering_terms(facts, disclosures)
+
+        if args.deep_ocr_allocation:
+            recovery = recover_allocation_sections(
+                record_id, disclosures_by_record[record_id], pdf_cache=pdf_cache, ocr_cache=ocr_cache,
+            )
+            if not recovery.already_resolved:
+                print(
+                    f"  {record_id}: deep-OCR allocation recovery — {len(recovery.attempts)} step(s), "
+                    f"resolved={recovery.resolved}",
+                    file=sys.stderr,
+                )
+            terms = recovery.offering_terms
+
         for name in OFFERING_TERM_FIELD_NAMES:
             field = getattr(terms, name)
             per_field_status[name][field.status] += 1

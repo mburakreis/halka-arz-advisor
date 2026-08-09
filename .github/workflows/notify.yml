@@ -15,6 +15,12 @@ concurrency:
 jobs:
   check-and-notify:
     runs-on: ubuntu-latest
+    # Backstop only, not the fix: with the historical-backfill/issuer-IR
+    # crawl steps moved to their own workflow (see backfill.yml), a
+    # normal run now finishes in ~15-25 minutes. This bounds the
+    # worst case (e.g. a genuinely stuck external call) instead of
+    # letting a stalled run silently eat the default 360-minute cap.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,28 +39,32 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: uv run python scripts/check_and_notify.py --state-file state/seen_records.json
 
-      # actions/cache's post-job save step needs all six paths to
-      # exist — normally guaranteed by the fetch/backfill/analysis steps
-      # below writing at least one file, but not on a run that matches/
+      # actions/cache's post-job save step needs all four paths to
+      # exist — normally guaranteed by the fetch/analysis steps below
+      # writing at least one file, but not on a run that matches/
       # analyzes nothing (e.g. no KAP disclosures at all in the
       # lookback window).
       - name: Ensure cache directories exist
-        run: mkdir -p data/cache/kap_pdfs data/cache/llm_analysis data/cache/kap_ocr data/cache/kap_backfill data/cache/kap_issuer_ir data/cache/evds
+        run: mkdir -p data/cache/kap_pdfs data/cache/llm_analysis data/cache/kap_ocr data/cache/evds
 
-      # KAP PDFs, Gemini analysis results, OCR text, the historical-
-      # backfill/issuer-IR search state, and the EVDS market-context
-      # cache are pure caches (like the rest of data/cache/*, gitignored
-      # — see .gitignore), not notification state, so they persist
-      # across runs via the Actions cache rather than being committed to
-      # the repo like state/seen_records.json below. Restored here,
-      # saved automatically at the end of the job.
-      # data/cache/kap_backfill/data/cache/kap_issuer_ir specifically are
-      # what let scripts/backfill_kap_history.py and
-      # scripts/ingest_issuer_ir_documents.py below skip an already-
-      # exhausted search/crawl on a later scheduled run instead of
-      # repeating it every hour; data/cache/evds is what lets
-      # scripts/refresh_evds_market_context.py only ever request the gap
-      # since its own last cached observation.
+      # KAP PDFs, Gemini analysis results, OCR text, and the EVDS
+      # market-context cache are pure caches (like the rest of
+      # data/cache/*, gitignored — see .gitignore), not notification
+      # state, so they persist across runs via the Actions cache rather
+      # than being committed to the repo like state/seen_records.json
+      # below. Restored here, saved automatically at the end of the job.
+      # data/cache/evds is what lets scripts/refresh_evds_market_context.py
+      # only ever request the gap since its own last cached observation.
+      #
+      # This also restores data/cache/kap_backfill and data/cache/kap_issuer_ir
+      # — populated by the separate, low-frequency backfill.yml workflow
+      # (historical KAP search / issuer-IR crawling; see that file for
+      # why it doesn't belong in this hourly job) — even though this job
+      # never writes to them itself, so scripts/analyze_pending_ipos.py
+      # and scripts/send_pending_analyses.py below can merge in whatever
+      # backfill.yml already found via their own cheap, network-free
+      # cache reads (see halka_arz_advisor.kap.backfill.merge_backfilled_disclosures
+      # and halka_arz_advisor.issuer_ir.ingest.collect_supplementary_disclosures).
       - name: Restore KAP PDF, Gemini analysis, OCR, backfill, issuer-IR, and EVDS caches
         uses: actions/cache@v4
         with:
@@ -77,35 +87,20 @@ jobs:
       # never had Tesseract at all — every other step still runs.
       - name: Install Tesseract OCR (tur+eng)
         continue-on-error: true
+        timeout-minutes: 5
         run: |
           sudo apt-get update
           sudo apt-get install -y tesseract-ocr tesseract-ocr-tur tesseract-ocr-eng
 
       - name: Fetch and cache KAP disclosure documents
+        # Bounded to the recent-disclosure window only (see
+        # scripts/fetch_kap_disclosures.py) — this is the "new SPK/KAP
+        # data" step, not a historical search. timeout-minutes is a
+        # backstop in case KAP itself stalls past its own per-request
+        # timeout/retry budget (see halka_arz_advisor.probe.http_client);
+        # a normal run finishes in a few minutes.
+        timeout-minutes: 15
         run: uv run python scripts/fetch_kap_disclosures.py --parse-documents --ocr-scanned > /dev/null
-
-      - name: Backfill missing historical KAP documents
-        # A matched company still missing one of the five supported
-        # document types (see halka_arz_advisor.kap.backfill) gets a
-        # bounded historical search here — persisted to
-        # data/cache/kap_backfill/ so an already-exhausted search is
-        # never repeated on a later run. Best-effort: a KAP/SPK fetch
-        # failure here must not block the analysis/notification steps
-        # below, which work fine off whatever was already cached.
-        continue-on-error: true
-        run: uv run python scripts/backfill_kap_history.py --ocr-scanned > /dev/null
-
-      - name: Ingest issuer investor-relations documents (KAP-independent fallback)
-        # For a registered issuer (see halka_arz_advisor.issuer_ir.registry)
-        # still missing a supported document type after the KAP steps
-        # above, this crawls that issuer's own IPO page once and ingests
-        # matching same-domain PDFs — deterministic title/link-text
-        # classification only, no LLM. Persisted to
-        # data/cache/kap_issuer_ir/ so an already-satisfied crawl is
-        # never repeated. Best-effort, same as the backfill step: an
-        # unreachable issuer site must not block analysis/notification.
-        continue-on-error: true
-        run: uv run python scripts/ingest_issuer_ir_documents.py --ocr-scanned > /dev/null
 
       - name: Refresh EVDS market-context cache
         # Fully isolated from the KAP pipeline (halka_arz_advisor.evds) —
@@ -118,6 +113,7 @@ jobs:
         # way cached market-context data (if any) remains usable by
         # scripts/audit_decision_coverage.py.
         continue-on-error: true
+        timeout-minutes: 10
         env:
           EVDS_API_KEY: ${{ secrets.EVDS_API_KEY }}
         run: uv run python scripts/refresh_evds_market_context.py > /dev/null
@@ -130,7 +126,10 @@ jobs:
         # naturally retried on the next hourly run since nothing gets
         # cached for a skipped/failed one. continue-on-error is a second
         # layer of protection for a total-outage/full-preflight failure.
+        # timeout-minutes is a third: a normal run analyzes only the
+        # small pending set and finishes well under this.
         continue-on-error: true
+        timeout-minutes: 20
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: uv run python scripts/analyze_pending_ipos.py > /dev/null
@@ -145,6 +144,7 @@ jobs:
         # for the next hourly run to retry, and nothing gets committed
         # until delivery actually succeeded.
         continue-on-error: true
+        timeout-minutes: 20
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -159,6 +159,18 @@ jobs:
         # may not exist yet. `git add` on a nonexistent path exits non-zero
         # and would abort this step under bash's default `-e`, so each is
         # only added if present.
+        #
+        # git push here can be legitimately rejected (non-fast-forward)
+        # by any other commit landing on master while this job was
+        # running — e.g. normal local development pushes, not just
+        # another workflow run. That's an expected race, not a genuine
+        # failure, so it's resolved with a rebase-and-retry loop rather
+        # than failing the whole run outright (which previously
+        # discarded this run's state update and risked re-sending
+        # already-delivered notifications on the next run). A push
+        # rejected for a real reason (e.g. an actual conflicting state
+        # change) still surfaces as a genuine failure after the retries
+        # are exhausted.
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -166,7 +178,15 @@ jobs:
           [ -f state/sent_analyses.json ] && git add state/sent_analyses.json
           if git diff --cached --quiet; then
             echo "No state changes to commit."
-          else
-            git commit -m "chore: update seen IPO records and sent-analysis state"
-            git push
+            exit 0
           fi
+          git commit -m "chore: update seen IPO records and sent-analysis state"
+          for attempt in 1 2 3; do
+            if git push; then
+              exit 0
+            fi
+            echo "git push rejected (attempt $attempt/3) — rebasing onto the latest origin/master and retrying..."
+            git pull --rebase origin master
+          done
+          echo "::error::git push failed after 3 attempts."
+          exit 1

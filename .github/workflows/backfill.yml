@@ -1,0 +1,98 @@
+name: SPK IPO KAP backfill
+
+# Historical KAP document search (scripts/backfill_kap_history.py) and
+# issuer investor-relations crawling (scripts/ingest_issuer_ir_documents.py)
+# are best-effort *discovery* passes over every matched IPO/application
+# record for the year, bounded but not cheap (tens of minutes) — the
+# opposite of the hourly notify.yml workflow's job, which only needs to
+# react to new SPK/KAP data and notify quickly. Both scripts are
+# cache-first (data/cache/kap_backfill, data/cache/kap_issuer_ir) and
+# never repeat an already-exhausted search, so running this once a day
+# is enough to keep that cache warm; notify.yml's analyze/send steps
+# merge in whatever is cached here via cheap, network-free reads (see
+# halka_arz_advisor.kap.backfill.merge_backfilled_disclosures and
+# halka_arz_advisor.issuer_ir.ingest.collect_supplementary_disclosures).
+#
+# Writes only to the gitignored data/cache/* dirs shared with
+# notify.yml via the Actions cache below — never touches state/*.json,
+# so unlike notify.yml this workflow has no git-push step and no
+# `contents: write` permission to request.
+
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv and Python 3.11
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync --locked --no-dev
+
+      # Same six paths (and the same cache key/restore-keys prefix) as
+      # notify.yml, so both workflows share one cache lineage: whichever
+      # ran most recently wins the restore, and each saves its own
+      # updates back under its own run_id key.
+      - name: Ensure cache directories exist
+        run: mkdir -p data/cache/kap_pdfs data/cache/llm_analysis data/cache/kap_ocr data/cache/kap_backfill data/cache/kap_issuer_ir data/cache/evds
+
+      - name: Restore KAP PDF, Gemini analysis, OCR, backfill, issuer-IR, and EVDS caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/cache/kap_pdfs
+            data/cache/llm_analysis
+            data/cache/kap_ocr
+            data/cache/kap_backfill
+            data/cache/kap_issuer_ir
+            data/cache/evds
+          key: llm-analysis-cache-${{ github.run_id }}
+          restore-keys: |
+            llm-analysis-cache-
+
+      - name: Install Tesseract OCR (tur+eng)
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-tur tesseract-ocr-eng
+
+      - name: Backfill missing historical KAP documents
+        # A matched company still missing one of the five supported
+        # document types (see halka_arz_advisor.kap.backfill) gets a
+        # bounded historical search here — persisted to
+        # data/cache/kap_backfill/ so an already-exhausted search is
+        # never repeated on a later run. continue-on-error: a KAP/SPK
+        # outage here must not fail the whole backfill pass; timeout-minutes
+        # bounds a stall past the per-request timeout/retry budget
+        # (halka_arz_advisor.probe.http_client) instead of letting it
+        # silently consume the whole job.
+        continue-on-error: true
+        timeout-minutes: 45
+        run: uv run python scripts/backfill_kap_history.py --ocr-scanned
+
+      - name: Ingest issuer investor-relations documents (KAP-independent fallback)
+        # For a registered issuer (see halka_arz_advisor.issuer_ir.registry)
+        # still missing a supported document type after the KAP step
+        # above, this crawls that issuer's own IPO page once and ingests
+        # matching same-domain PDFs — deterministic title/link-text
+        # classification only, no LLM. Persisted to
+        # data/cache/kap_issuer_ir/ so an already-satisfied crawl is
+        # never repeated. Same protections as the backfill step above.
+        continue-on-error: true
+        timeout-minutes: 30
+        run: uv run python scripts/ingest_issuer_ir_documents.py --ocr-scanned

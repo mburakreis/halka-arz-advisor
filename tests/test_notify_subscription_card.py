@@ -1,5 +1,6 @@
 from datetime import date, datetime
 
+from halka_arz_advisor.decision.subscription_economics import PersonalCapitalContext
 from halka_arz_advisor.decision.subscription_v1 import SubscriptionDecisionInputs, evaluate_subscription_decision
 from halka_arz_advisor.ipo_outcomes.models import IpoMarketOutcome
 from halka_arz_advisor.kap.extraction import SourceRef
@@ -54,6 +55,27 @@ def _outcome(ticker: str, trading_start: date, bist_relative_5d: float) -> IpoMa
 
 FAVORABLE_OUTCOMES = tuple(_outcome(f"F{i}", date(2026, 7, 15), 25.0) for i in range(5))
 
+
+def _outcome_with_return(ticker: str, trading_start: date, return_5d: float) -> IpoMarketOutcome:
+    return IpoMarketOutcome(
+        ticker=ticker, company_name=None, offer_price=10.0,
+        resolved_trading_start_date=trading_start, spk_trading_start_date=trading_start,
+        kap_trading_start_announcement_dates=(), trading_start_conflict=False,
+        price_observation_count=10, last_price_observation_date=trading_start,
+        first_day_return=5.0, return_5d=return_5d, return_20d=None, return_3m=None,
+        max_drawdown_5d=None, max_drawdown_20d=None, max_drawdown_3m=None,
+        bist_relative_first_day=5.0, bist_relative_5d=return_5d, bist_relative_20d=None, bist_relative_3m=None,
+        generated_at=datetime(2026, 7, 1),
+    )
+
+
+# 6 outcomes with distinct returns — enough to clear STRONG_EVIDENCE_MATURE_IPO_COUNT
+# and exercise the historical_regime (not illustrative) return-scenario path.
+HISTORICAL_RETURN_OUTCOMES = tuple(
+    _outcome_with_return(f"H{i}", date(2026, 7, 1), value)
+    for i, value in enumerate([-20.0, -5.0, 10.0, 20.0, 30.0, 60.0])
+)
+
 _PDR_SOURCE = SourceRef("price_determination_report", "d-pdr", "url", 5)
 SUFFICIENT_FINANCIAL_OBSERVATIONS = (
     FinancialObservation(
@@ -70,6 +92,7 @@ def _decision(terms, **kwargs):
         offering_terms=terms, completed_terms=completed, derived_financials=kwargs.pop("derived", None),
         valuation_evidence=valuation, market_context=kwargs.pop("market", None), as_of=AS_OF, ticker="ORNK",
         recent_ipo_outcomes=kwargs.pop("recent_ipo_outcomes", ()), disclosures=kwargs.pop("disclosures", ()),
+        personal_capital=kwargs.pop("personal_capital", None),
     )
     return completed, evaluate_subscription_decision(inputs)
 
@@ -100,11 +123,53 @@ def test_resolved_card_with_favorable_regime_shows_subscribe_and_regime_stats():
     assert "12.50 TL" in message
     assert "01.08.2026 - 20.08.2026" in message
     assert "sabit fiyatla talep toplama" in message
-    assert "Tahsisat senaryoları" in message
+    assert "Tahsisat / sermaye" in message
+    assert "Düşük talep" in message and "Tipik talep" in message and "Yüksek talep" in message
     assert "50.000 katılımcı" in message
     assert "Katıl (kısa vadeli işlem)" in message
     assert "Yakın dönem halka arz rejimi" in message
     assert "Olgun karşılaştırma sayısı: 5" in message
+
+
+def test_card_shows_tl_profit_loss_grounded_in_real_historical_returns_when_enough_comparables():
+    terms = _resolved_terms()
+    completed, decision = _decision(terms, recent_ipo_outcomes=HISTORICAL_RETURN_OUTCOMES)
+
+    message = format_subscription_card(
+        company_name="Örnek A.Ş.", ticker="ORNK", offering_terms=terms, completed_terms=completed, decision=decision,
+    )
+
+    assert decision.subscription_economics.return_scenario_source == "historical_regime"
+    assert "Olası kâr/zarar" in message
+    assert "gerçek 5 günlük getirileri" in message
+    assert "gösterge" not in message.split("Olası kâr/zarar")[1].split("\n\n")[0]
+
+
+def test_card_falls_back_to_illustrative_return_scenarios_with_too_few_comparables():
+    terms = _resolved_terms()
+    completed, decision = _decision(terms, recent_ipo_outcomes=FAVORABLE_OUTCOMES)  # only 5, below the strong-evidence bar
+
+    message = format_subscription_card(
+        company_name="Örnek A.Ş.", ticker="ORNK", offering_terms=terms, completed_terms=completed, decision=decision,
+    )
+
+    assert decision.subscription_economics.return_scenario_source == "illustrative"
+    assert "Olası kâr/zarar" in message
+    assert "gösterge senaryolar, bir tahmin değildir" in message
+
+
+def test_card_shows_personal_capital_note_when_provided():
+    terms = _resolved_terms()
+    completed, decision = _decision(
+        terms, recent_ipo_outcomes=HISTORICAL_RETURN_OUTCOMES,
+        personal_capital=PersonalCapitalContext(available_capital_tl=1000.0),
+    )
+
+    message = format_subscription_card(
+        company_name="Örnek A.Ş.", ticker="ORNK", offering_terms=terms, completed_terms=completed, decision=decision,
+    )
+
+    assert "Kişisel sermaye bağlamı" in message
 
 
 def test_supportive_mechanics_alone_shows_watch_not_subscribe():

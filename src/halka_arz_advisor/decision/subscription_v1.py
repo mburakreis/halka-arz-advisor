@@ -10,8 +10,11 @@ from ``engine``/``scoring_config``/``catalog``/``audit``/``snapshot``/
 :mod:`halka_arz_advisor.kap.allocation_scenario`,
 :mod:`halka_arz_advisor.kap.derived_financials`,
 :mod:`halka_arz_advisor.kap.valuation`,
-:mod:`halka_arz_advisor.ipo_outcomes.regime`, and
-:mod:`halka_arz_advisor.evds.models`.
+:mod:`halka_arz_advisor.ipo_outcomes.regime`,
+:mod:`halka_arz_advisor.decision.subscription_economics` (a sibling
+module in this same package, composing this module's own
+``AllocationScenario``/``ipo_outcomes`` inputs — not a new external
+dependency), and :mod:`halka_arz_advisor.evds.models`.
 
 **r2 (2026-08-08): hardened against several real economic overclaims r1
 made** (see :data:`RULE_VERSION`) — r1 treated "equal distribution + a
@@ -67,6 +70,22 @@ computed, which weren't and why, and whether the evidence is sufficient
 for a price sanity check — this module never computes or exposes a
 cheap/expensive verdict, and neither does ``kap.valuation``.
 
+**r4 (2026-08-09): added TL-denominated subscription economics**
+(:mod:`halka_arz_advisor.decision.subscription_economics`) — for each of
+this module's own ``allocation_scenarios``, roughly how much capital
+that demand scenario would actually require and what a handful of
+plausible post-listing return scenarios would mean in TL. Grounded in
+real, other-IPOs' actual 5-day returns (the same leakage-safe
+``ipo_outcomes.regime`` selection ``subscription_edge`` already reads)
+when there's a defensible sample, otherwise a small, clearly labeled
+illustrative band — never a new expected-return forecast. This is pure
+downstream arithmetic with no verdict of its own: it never feeds
+``action``/``subscription_edge``/``mechanics_state``, exactly like
+``allocation_scenarios`` before it. ``personal_capital`` is a new,
+optional single-number input (never a portfolio) purely to annotate
+whether a scenario's required capital is economically meaningful for
+the caller.
+
 **Gates, not points** (unchanged in spirit from r1). Every rule below is
 a pass/fail gate evaluated in a fixed order; nothing here sums or
 averages a "score" across rules, so a strong result on one axis can
@@ -90,8 +109,9 @@ from ..kap.models import KapDisclosure
 from ..kap.offering_terms import OfferingTerms
 from ..kap.text import fold_turkish
 from ..kap.valuation import ValuationEvidence
+from .subscription_economics import PersonalCapitalContext, SubscriptionEconomics, build_subscription_economics
 
-RULE_VERSION = "subscription_v1_r3"
+RULE_VERSION = "subscription_v1_r4"
 
 SubscriptionAction = Literal[
     "SUBSCRIBE_FOR_LISTING_TRADE",
@@ -194,6 +214,10 @@ class SubscriptionDecisionInputs:
     # structural rather than a caller obligation.
     recent_ipo_outcomes: tuple[IpoMarketOutcome, ...] = ()
     disclosures: tuple[KapDisclosure, ...] = ()
+    # Optional, investor-level (never per-position/portfolio) capital
+    # figure — see subscription_economics.PersonalCapitalContext's own
+    # docstring for why this stays a single number.
+    personal_capital: PersonalCapitalContext | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +233,7 @@ class SubscriptionDecisionV1:
     recent_ipo_regime: RecentIpoRegime
     valuation_evidence: ValuationEvidence
     allocation_scenarios: tuple[AllocationScenario, ...]
+    subscription_economics: SubscriptionEconomics
     manually_confirmed_fields: tuple[str, ...]
     strongest_positive_evidence: tuple[str, ...]
     strongest_risks: tuple[str, ...]
@@ -442,6 +467,13 @@ def evaluate_subscription_decision(inputs: SubscriptionDecisionInputs) -> Subscr
     scenarios = tuple(
         build_allocation_scenario(effective_terms, count) for count in DEFAULT_ALLOCATION_SCENARIO_PARTICIPANT_COUNTS
     )
+    economics = build_subscription_economics(
+        scenarios,
+        recent_ipo_outcomes=inputs.recent_ipo_outcomes,
+        as_of=inputs.as_of,
+        exclude_ticker=inputs.ticker,
+        personal_capital=inputs.personal_capital,
+    )
 
     watchworthy = ownership_view in ("HOLD_CANDIDATE", "WATCH")
 
@@ -509,6 +541,7 @@ def evaluate_subscription_decision(inputs: SubscriptionDecisionInputs) -> Subscr
         recent_ipo_regime=regime,
         valuation_evidence=inputs.valuation_evidence,
         allocation_scenarios=scenarios,
+        subscription_economics=economics,
         manually_confirmed_fields=manually_confirmed,
         strongest_positive_evidence=strongest_positive,
         strongest_risks=strongest_risks,
@@ -521,6 +554,7 @@ def evaluate_subscription_decision(inputs: SubscriptionDecisionInputs) -> Subscr
 def subscription_decision_as_dict(decision: SubscriptionDecisionV1) -> dict:
     from ..kap.allocation_scenario import allocation_scenario_as_dict
     from ..kap.valuation import valuation_evidence_as_dict
+    from .subscription_economics import subscription_economics_as_dict
 
     return {
         "action": decision.action,
@@ -541,6 +575,7 @@ def subscription_decision_as_dict(decision: SubscriptionDecisionV1) -> dict:
         },
         "valuation_evidence": valuation_evidence_as_dict(decision.valuation_evidence),
         "allocation_scenarios": [allocation_scenario_as_dict(s) for s in decision.allocation_scenarios],
+        "subscription_economics": subscription_economics_as_dict(decision.subscription_economics),
         "manually_confirmed_fields": list(decision.manually_confirmed_fields),
         "strongest_positive_evidence": list(decision.strongest_positive_evidence),
         "strongest_risks": list(decision.strongest_risks),
@@ -557,6 +592,10 @@ __all__ = [
     "FinancialQuality",
     "MechanicsState",
     "OwnershipView",
+    # Re-exported for convenience: callers building SubscriptionDecisionInputs
+    # need this to populate its optional personal_capital field, and it's
+    # otherwise defined in the sibling subscription_economics module.
+    "PersonalCapitalContext",
     "SubscriptionAction",
     "SubscriptionDecisionInputs",
     "SubscriptionDecisionV1",

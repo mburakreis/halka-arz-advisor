@@ -111,6 +111,28 @@ def _is_mature(outcome: IpoMarketOutcome, *, as_of: datetime, lookback_days: int
     return completion_date <= as_of_date
 
 
+def select_mature_outcomes(
+    outcomes: Sequence[IpoMarketOutcome],
+    *,
+    as_of: datetime,
+    exclude_ticker: str | None,
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+) -> tuple[IpoMarketOutcome, ...]:
+    """The same leakage-safe, point-in-time maturity filter
+    :func:`build_recent_ipo_regime` uses internally, exposed on its own
+    so another consumer that needs the mature outcomes' own raw fields
+    (not just this module's median/positive-share aggregate) — e.g.
+    :mod:`halka_arz_advisor.decision.subscription_economics`, which
+    needs each mature IPO's actual ``return_5d`` to price a plausible
+    TL profit/loss, not the BIST-relative figure this module reads for
+    its own, different purpose — can reuse the exact same selection
+    instead of re-implementing the leakage-safety rules (see module
+    docstring)."""
+    excluded = exclude_ticker.strip().upper() if exclude_ticker else None
+    candidates = [o for o in outcomes if excluded is None or o.ticker.upper() != excluded]
+    return tuple(o for o in candidates if _is_mature(o, as_of=as_of, lookback_days=lookback_days))
+
+
 def build_recent_ipo_regime(
     outcomes: Sequence[IpoMarketOutcome],
     *,
@@ -123,9 +145,7 @@ def build_recent_ipo_regime(
     :func:`load_all_outcomes`); ``exclude_ticker`` (the target IPO's
     own ticker) is structurally required so the target's own outcome,
     even if present in ``outcomes``, can never be counted."""
-    excluded = exclude_ticker.strip().upper() if exclude_ticker else None
-    candidates = [o for o in outcomes if excluded is None or o.ticker.upper() != excluded]
-    mature = [o for o in candidates if _is_mature(o, as_of=as_of, lookback_days=lookback_days)]
+    mature = list(select_mature_outcomes(outcomes, as_of=as_of, exclude_ticker=exclude_ticker, lookback_days=lookback_days))
 
     if len(mature) < MIN_MATURE_IPOS_FOR_REGIME:
         return RecentIpoRegime(
@@ -182,4 +202,5 @@ __all__ = [
     "RecentIpoRegimeStatus",
     "build_recent_ipo_regime",
     "load_all_outcomes",
+    "select_mature_outcomes",
 ]

@@ -27,7 +27,7 @@ already-fully-realized IPOs' results.
 from .builder import build_ipo_market_outcome
 from .calculations import RETURN_WINDOWS, OutcomeValue
 from .models import IpoMarketOutcome
-from .regime import RecentIpoRegime, RecentIpoRegimeStatus, build_recent_ipo_regime, load_all_outcomes
+from .regime import RecentIpoRegime, RecentIpoRegimeStatus, build_recent_ipo_regime, load_all_outcomes, select_mature_outcomes
 from .store import IpoMarketOutcomeStore
 from .trading_start import TradingStartResolution, resolve_trading_start_date
 
@@ -43,4 +43,5 @@ __all__ = [
     "RecentIpoRegimeStatus",
     "TradingStartResolution",
     "resolve_trading_start_date",
+    "select_mature_outcomes",
 ]

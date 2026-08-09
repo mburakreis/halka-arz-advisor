@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from halka_arz_advisor.decision.subscription_economics import PersonalCapitalContext
+from halka_arz_advisor.decision.subscription_economics import SubscriptionCapitalLimit
 from halka_arz_advisor.decision.subscription_v1 import SubscriptionDecisionInputs, evaluate_subscription_decision
 from halka_arz_advisor.ipo_outcomes.models import IpoMarketOutcome
 from halka_arz_advisor.kap.extraction import SourceRef
@@ -92,7 +92,7 @@ def _decision(terms, **kwargs):
         offering_terms=terms, completed_terms=completed, derived_financials=kwargs.pop("derived", None),
         valuation_evidence=valuation, market_context=kwargs.pop("market", None), as_of=AS_OF, ticker="ORNK",
         recent_ipo_outcomes=kwargs.pop("recent_ipo_outcomes", ()), disclosures=kwargs.pop("disclosures", ()),
-        personal_capital=kwargs.pop("personal_capital", None),
+        subscription_capital_limit=kwargs.pop("subscription_capital_limit", None),
     )
     return completed, evaluate_subscription_decision(inputs)
 
@@ -131,7 +131,7 @@ def test_resolved_card_with_favorable_regime_shows_subscribe_and_regime_stats():
     assert "Olgun karşılaştırma sayısı: 5" in message
 
 
-def test_card_shows_tl_profit_loss_grounded_in_real_historical_returns_when_enough_comparables():
+def test_card_shows_historical_observation_and_stress_scenario_as_separate_sections():
     terms = _resolved_terms()
     completed, decision = _decision(terms, recent_ipo_outcomes=HISTORICAL_RETURN_OUTCOMES)
 
@@ -139,37 +139,58 @@ def test_card_shows_tl_profit_loss_grounded_in_real_historical_returns_when_enou
         company_name="Örnek A.Ş.", ticker="ORNK", offering_terms=terms, completed_terms=completed, decision=decision,
     )
 
-    assert decision.subscription_economics.return_scenario_source == "historical_regime"
-    assert "Olası kâr/zarar" in message
-    assert "gerçek 5 günlük getirileri" in message
-    assert "gösterge" not in message.split("Olası kâr/zarar")[1].split("\n\n")[0]
+    assert "Yakın dönem karşılaştırılabilir halka arzlar" in message
+    assert "Karşılaştırma sayısı: 6" in message
+    assert "Stres senaryosu" in message
+    # the two sections appear in this order and are visibly distinct
+    assert message.index("Yakın dönem karşılaştırılabilir") < message.index("Stres senaryosu")
 
 
-def test_card_falls_back_to_illustrative_return_scenarios_with_too_few_comparables():
+def test_card_still_shows_a_negative_stress_scenario_when_all_recent_ipos_were_positive():
+    # This is the core bug being fixed: a small all-positive comparable
+    # cohort must never make the card's only downside figure positive.
+    all_positive_outcomes = tuple(
+        _outcome_with_return(f"P{i}", date(2026, 7, 1), value) for i, value in enumerate([5.0, 20.0, 40.0, 60.0, 61.0, 61.0])
+    )
     terms = _resolved_terms()
-    completed, decision = _decision(terms, recent_ipo_outcomes=FAVORABLE_OUTCOMES)  # only 5, below the strong-evidence bar
+    completed, decision = _decision(terms, recent_ipo_outcomes=all_positive_outcomes)
 
     message = format_subscription_card(
         company_name="Örnek A.Ş.", ticker="ORNK", offering_terms=terms, completed_terms=completed, decision=decision,
     )
 
-    assert decision.subscription_economics.return_scenario_source == "illustrative"
-    assert "Olası kâr/zarar" in message
-    assert "gösterge senaryolar, bir tahmin değildir" in message
+    assert decision.subscription_economics.historical_observation.observed_worst_pct > 0
+    stress_section = message[message.index("Stres senaryosu") :]
+    assert "%-20.0" in stress_section
+    assert "-5 TL" in stress_section  # a negative TL figure is actually shown, not just a negative percent
 
 
-def test_card_shows_personal_capital_note_when_provided():
+def test_card_distinguishes_theoretical_from_executable_allocation_under_a_capital_limit():
     terms = _resolved_terms()
     completed, decision = _decision(
         terms, recent_ipo_outcomes=HISTORICAL_RETURN_OUTCOMES,
-        personal_capital=PersonalCapitalContext(available_capital_tl=1000.0),
+        subscription_capital_limit=SubscriptionCapitalLimit(max_subscription_capital_tl=100.0),
     )
 
     message = format_subscription_card(
         company_name="Örnek A.Ş.", ticker="ORNK", offering_terms=terms, completed_terms=completed, decision=decision,
     )
 
-    assert "Kişisel sermaye bağlamı" in message
+    assert "teorik" in message
+    assert "uygulanabilir" in message
+    low_demand_line = next(line for line in message.splitlines() if "Düşük talep" in line)
+    assert "teorik" in low_demand_line and "uygulanabilir" in low_demand_line
+
+
+def test_card_omits_executable_allocation_when_no_capital_limit_supplied():
+    terms = _resolved_terms()
+    completed, decision = _decision(terms, recent_ipo_outcomes=HISTORICAL_RETURN_OUTCOMES)
+
+    message = format_subscription_card(
+        company_name="Örnek A.Ş.", ticker="ORNK", offering_terms=terms, completed_terms=completed, decision=decision,
+    )
+
+    assert "uygulanabilir:" not in message
 
 
 def test_supportive_mechanics_alone_shows_watch_not_subscribe():

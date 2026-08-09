@@ -1,12 +1,15 @@
 """Connects a hypothetical retail :class:`~halka_arz_advisor.kap.allocation_scenario.AllocationScenario`'s
-TL capital exposure to plausible TL profit/loss outcomes.
+TL capital exposure to (a) real historical context and (b) a fixed,
+clearly-labeled stress illustration — and, when the caller supplies a
+subscription capital limit, to what could actually be executed under
+it.
 
 :mod:`halka_arz_advisor.decision.subscription_v1` decides *whether* to
 subscribe; this module answers a different, narrower question it
 deliberately leaves open — "if I did, roughly how much money is
 actually at stake, and what could I plausibly gain or lose in TL?" —
-by composing two pieces of evidence that already exist elsewhere,
-without touching either:
+by composing evidence that already exists elsewhere, without touching
+either:
 
 - :mod:`halka_arz_advisor.kap.allocation_scenario` for how many shares
   (and how much TL) a hypothetical demand scenario implies.
@@ -21,25 +24,45 @@ without touching either:
 No new extraction, no new participant-count forecasting (a demand
 scenario's hypothetical participant count is always the caller's
 what-if input, exactly as in ``kap.allocation_scenario`` itself — never
-predicted here), and no new expected-return model. Two independent
-kinds of uncertainty are kept explicit and are never collapsed into one
-number:
+predicted here), and no new expected-return model.
 
-- **Allocation uncertainty** — how many shares (and how much capital) a
-  given demand scenario would actually get you. Already modeled by
-  ``AllocationScenario`` itself as a baseline plus a floor/remainder
-  range, not a single confident number; this module passes that
-  range through unchanged rather than picking a point estimate.
-- **Return uncertainty** — what the stock might actually do after
-  listing. This module never invents an expected return. When at
-  least :data:`~halka_arz_advisor.ipo_outcomes.regime.STRONG_EVIDENCE_MATURE_IPO_COUNT`
-  other, already-settled recent IPOs have a resolved 5-trading-day
-  return, the return scenarios are the worst/median/best *actual*
-  returns among them — real historical outcomes, not a fitted
-  distribution or a forecast of this IPO's own return. Below that
-  evidence bar, return scenarios fall back to a small, fixed,
-  clearly-labeled illustrative band (:data:`ILLUSTRATIVE_RETURN_SCENARIOS`)
-  that is never presented as a prediction.
+**Historical observation and stress illustration are two structurally
+separate things, never blended into one "return scenario" concept.**
+An earlier version of this module read a small recent-IPO cohort's own
+worst/median/best actual return as if it were this IPO's own plausible
+loss range — if every recent comparable happened to be positive, that
+made the "worst case" read as a positive number, which is not a
+downside scenario at all, just an artifact of a small, currently-
+favorable sample. This version keeps both pieces, clearly separated:
+
+- :func:`build_historical_observation` — the real worst/median/best
+  ``return_5d`` among other, already-settled recent comparable IPOs
+  (see :class:`HistoricalObservation`), reported purely as *what already
+  happened*, with the comparable count always shown alongside it so a
+  human can judge the sample size themselves. Never converted to a
+  TL profit/loss, and never labeled a "scenario" — nothing here implies
+  it bounds this IPO's own future return in either direction.
+- :func:`build_stress_scenarios` — a small, fixed, stated
+  capital-at-risk illustration (:data:`STRESS_RETURN_SCENARIOS`), the
+  same regardless of what the recent cohort happened to do. This is
+  the only thing priced into a TL profit/loss
+  (:class:`StressOutcome`) — deliberately not a statistical
+  value-at-risk estimate or a fitted distribution, just "here is what a
+  stated illustrative move would mean in TL."
+
+**Allocation uncertainty** (how many shares a demand scenario would
+actually get you) stays exactly as ``AllocationScenario`` already
+models it — a baseline plus a floor/remainder range, passed through
+unchanged, never collapsed into a single confident number.
+
+**Executable allocation.** When the caller supplies a
+:class:`SubscriptionCapitalLimit`, each demand scenario also gets an
+:class:`ExecutableAllocation` — the whole-share count actually fundable
+with that capital (never more than the scenario's own theoretical
+allocation, never a fractional share), and whether capital was the
+binding constraint. Every TL profit/loss (:class:`StressOutcome`) is
+then priced on the *executable* capital when a limit was supplied —
+never on theoretical capital the caller does not actually have.
 
 Equal-distribution allocation mechanics are not, and must never be
 read as, an investment edge: this module attaches no verdict, edge, or
@@ -55,25 +78,27 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from statistics import median
-from typing import Literal
 
 from ..ipo_outcomes.models import IpoMarketOutcome
-from ..ipo_outcomes.regime import DEFAULT_LOOKBACK_DAYS, STRONG_EVIDENCE_MATURE_IPO_COUNT, select_mature_outcomes
+from ..ipo_outcomes.regime import DEFAULT_LOOKBACK_DAYS, select_mature_outcomes
 from ..kap.allocation_scenario import AllocationScenario
 
-SUBSCRIPTION_ECONOMICS_VERSION = "subscription_economics_r1"
+SUBSCRIPTION_ECONOMICS_VERSION = "subscription_economics_r2"
 
-ReturnScenarioSource = Literal["historical_regime", "illustrative"]
+# A small, fixed, stated capital-at-risk illustration — never fit
+# against this project's own ipo_outcomes data, and never influenced by
+# what the recent comparable cohort happened to do (see module
+# docstring for why the two must stay separate). Not a statistical
+# value-at-risk estimate or a forecast of any kind; every label says so
+# explicitly ("gösterge" = illustrative/indicative).
+STRESS_RETURN_SCENARIOS: tuple[tuple[str, float], ...] = (
+    ("Stres senaryosu (gösterge — sermaye riskini göstermek içindir)", -0.20),
+    ("İyimser gösterge (gösterge — bir tahmin değildir)", 0.20),
+)
 
-# A small, fixed, stated illustrative band — never fit against this
-# project's own ipo_outcomes data, and only ever used when there isn't
-# a defensible historical sample (see build_return_scenarios). A
-# symmetric +/-10% band plus one larger upside case, not a forecast of
-# any kind — every label says "gösterge" (illustrative/indicative).
-ILLUSTRATIVE_RETURN_SCENARIOS: tuple[tuple[str, float], ...] = (
-    ("Kötü senaryo (gösterge)", -0.10),
-    ("İyi senaryo (gösterge)", 0.10),
-    ("Çok iyi senaryo (gösterge)", 0.25),
+_STRESS_SCENARIO_BASIS = (
+    "fixed, stated illustrative move, not derived from any historical sample and not a statistical "
+    "value-at-risk estimate or forecast — used only to show what a capital-at-risk move would mean in TL."
 )
 
 # Labels for kap.allocation_scenario.DEFAULT_ALLOCATION_SCENARIO_PARTICIPANT_COUNTS'
@@ -85,155 +110,195 @@ DEMAND_LABELS_ASCENDING: tuple[str, ...] = ("Düşük talep", "Tipik talep", "Y�
 
 
 @dataclass(frozen=True, slots=True)
-class ReturnScenario:
-    """One plausible post-listing return, as a fraction (``0.10`` ==
-    +10%) — never a probability-weighted expectation."""
+class HistoricalObservation:
+    """Real, already-realized 5-day returns of other, already-settled
+    recent comparable IPOs. Pure historical fact-reporting — never a
+    prediction, never a claimed downside/upside bound for this IPO's
+    own future return, and never priced into a TL figure (that is what
+    :class:`StressOutcome` is for, deliberately kept separate)."""
 
-    label: str
-    return_pct: float
-    source: ReturnScenarioSource
+    comparable_count: int
+    observed_worst_pct: float | None
+    observed_median_pct: float | None
+    observed_best_pct: float | None
     basis: str
 
 
 @dataclass(frozen=True, slots=True)
-class ReturnOutcome:
-    scenario: ReturnScenario
+class StressScenario:
+    """One fixed, stated illustrative post-listing return, as a
+    fraction (``-0.20`` == -20%) — never a probability-weighted
+    expectation and never derived from ``HistoricalObservation``."""
+
+    label: str
+    return_pct: float
+    basis: str
+
+
+@dataclass(frozen=True, slots=True)
+class StressOutcome:
+    scenario: StressScenario
     profit_loss_tl: float
 
 
 @dataclass(frozen=True, slots=True)
-class AllocationEconomics:
-    """One demand scenario's shares/capital (from ``AllocationScenario``,
-    unchanged) plus what each return scenario would mean in TL on that
-    scenario's own baseline capital. Empty ``return_outcomes`` when the
-    underlying ``AllocationScenario`` itself couldn't resolve a TL
-    baseline (see its own ``status``/``caveats``) — never a guessed
-    capital figure."""
+class ExecutableAllocation:
+    """The whole-share allocation actually fundable with a supplied
+    :class:`SubscriptionCapitalLimit` — never more than the demand
+    scenario's own theoretical ``base_integer_allocation``, and never a
+    fractional share (``shares`` is computed by floor division on
+    price, exactly like ``AllocationScenario`` itself floors on
+    participant count)."""
 
-    demand_label: str
-    allocation_scenario: AllocationScenario
-    capital_tl: float | None
-    capital_tl_range: tuple[float, float] | None
-    return_outcomes: tuple[ReturnOutcome, ...]
+    shares: int
+    capital_tl: float
+    capital_constrained: bool
 
 
 @dataclass(frozen=True, slots=True)
-class PersonalCapitalContext:
-    """The simplest possible personal-capital input: one investor-level
-    TL figure, not a portfolio — deliberately not a portfolio-management
-    subsystem (position sizing, multi-IPO aggregation, risk budgets are
-    all out of scope here)."""
+class AllocationEconomics:
+    """One demand scenario's theoretical shares/capital (from
+    ``AllocationScenario``, unchanged), what could actually be executed
+    under a supplied capital limit (if any), and what the fixed stress
+    scenarios would mean in TL on the *executable* capital when a limit
+    was supplied, or on the theoretical capital otherwise. Empty
+    ``stress_outcomes`` when neither capital figure is resolved — never
+    a guessed capital figure."""
 
-    available_capital_tl: float
+    demand_label: str
+    allocation_scenario: AllocationScenario
+    theoretical_capital_tl: float | None
+    theoretical_capital_tl_range: tuple[float, float] | None
+    executable: ExecutableAllocation | None
+    stress_outcomes: tuple[StressOutcome, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionCapitalLimit:
+    """How much TL the caller is willing/able to commit to *this one*
+    subscription — deliberately not total personal wealth, and
+    deliberately not a portfolio (position sizing, multi-IPO
+    aggregation, risk budgets are all out of scope here)."""
+
+    max_subscription_capital_tl: float
 
 
 @dataclass(frozen=True, slots=True)
 class SubscriptionEconomics:
-    return_scenario_source: ReturnScenarioSource
-    return_scenario_basis: str
+    historical_observation: HistoricalObservation
+    stress_scenarios: tuple[StressScenario, ...]
     allocations: tuple[AllocationEconomics, ...]
-    personal_capital_notes: tuple[str, ...]
     version: str = SUBSCRIPTION_ECONOMICS_VERSION
 
 
-def build_return_scenarios(
+def build_historical_observation(
     recent_ipo_outcomes: Sequence[IpoMarketOutcome],
     *,
     as_of: datetime,
     exclude_ticker: str | None,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
-) -> tuple[tuple[ReturnScenario, ...], ReturnScenarioSource]:
-    """Pure — no I/O, no randomness. Returns ``(scenarios, source)``.
-
-    ``source`` is ``"historical_regime"`` only when at least
-    :data:`STRONG_EVIDENCE_MATURE_IPO_COUNT` other, already-settled
-    recent IPOs (the same leakage-safe selection
+) -> HistoricalObservation:
+    """Pure — no I/O. Reports the real worst/median/best *raw* (not
+    BIST-relative) 5-day return among other, already-settled recent
+    comparable IPOs (the same leakage-safe selection
     :func:`~halka_arz_advisor.ipo_outcomes.regime.build_recent_ipo_regime`
-    uses) have a resolved *raw* (not BIST-relative) 5-day return — the
-    figure that prices what an investor would have actually realized in
-    TL, unlike the BIST-relative figure ``RecentIpoRegime`` itself reads
-    for its own, different purpose (classifying a cross-sectional
-    regime, not pricing a P&L). ``STRONG_EVIDENCE_MATURE_IPO_COUNT`` is
-    reused rather than a new threshold invented for this module — it is
-    this project's own existing bar for "a clearly stronger evidence
-    base", and a worst/median/best read needs at least that many real
-    data points to be more than noise."""
+    uses) — the figure that prices what an investor would have actually
+    realized in TL, unlike the BIST-relative figure ``RecentIpoRegime``
+    itself reads for its own, different purpose. Always reported
+    alongside ``comparable_count`` so a human can judge the sample size
+    themselves; never gated behind a minimum-evidence threshold, since
+    this is raw fact-reporting, not a scenario this module (or any
+    caller) treats as decision-grade evidence on its own."""
     mature = select_mature_outcomes(recent_ipo_outcomes, as_of=as_of, exclude_ticker=exclude_ticker, lookback_days=lookback_days)
     returns = sorted(o.return_5d for o in mature if o.return_5d is not None)
 
-    if len(returns) < STRONG_EVIDENCE_MATURE_IPO_COUNT:
-        basis = (
-            f"only {len(returns)} other, already-settled recent IPO(s) with a resolved 5-day return in the last "
-            f"{lookback_days} day(s) — fewer than the {STRONG_EVIDENCE_MATURE_IPO_COUNT} this project treats as a "
-            "defensible sample, so these are fixed illustrative scenarios, not a forecast."
-        )
-        return (
-            tuple(
-                ReturnScenario(label=label, return_pct=pct, source="illustrative", basis=basis)
-                for label, pct in ILLUSTRATIVE_RETURN_SCENARIOS
-            ),
-            "illustrative",
+    if not returns:
+        return HistoricalObservation(
+            comparable_count=0,
+            observed_worst_pct=None,
+            observed_median_pct=None,
+            observed_best_pct=None,
+            basis=f"no other, already-settled recent comparable IPOs with a resolved 5-day return in the last {lookback_days} day(s) yet.",
         )
 
-    worst, typical, best = returns[0], median(returns), returns[-1]
     basis = (
-        f"actual 5-trading-day returns of {len(returns)} other, already-settled recent IPOs in the last "
-        f"{lookback_days} day(s) — real historical outcomes, not a prediction of this IPO's own return."
+        f"actual 5-trading-day returns of {len(returns)} other, already-settled recent comparable IPO(s) in the "
+        f"last {lookback_days} day(s) — real historical outcomes, not a prediction of this IPO's own return and "
+        "not a downside/upside bound: a small, currently all-positive (or all-negative) cohort does not mean the "
+        "same will hold here."
     )
-    scenarios = (
-        ReturnScenario(label="Kötü senaryo (yakın dönem en düşüğü)", return_pct=worst / 100.0, source="historical_regime", basis=basis),
-        ReturnScenario(label="Tipik senaryo (yakın dönem medyanı)", return_pct=typical / 100.0, source="historical_regime", basis=basis),
-        ReturnScenario(label="İyi senaryo (yakın dönem en yükseği)", return_pct=best / 100.0, source="historical_regime", basis=basis),
+    return HistoricalObservation(
+        comparable_count=len(returns),
+        observed_worst_pct=returns[0] / 100.0,
+        observed_median_pct=median(returns) / 100.0,
+        observed_best_pct=returns[-1] / 100.0,
+        basis=basis,
     )
-    return scenarios, "historical_regime"
+
+
+def build_stress_scenarios() -> tuple[StressScenario, ...]:
+    """Pure, deterministic, and independent of any historical data —
+    see :data:`STRESS_RETURN_SCENARIOS` and the module docstring for
+    why this must never be derived from ``HistoricalObservation``."""
+    return tuple(StressScenario(label=label, return_pct=pct, basis=_STRESS_SCENARIO_BASIS) for label, pct in STRESS_RETURN_SCENARIOS)
+
+
+def _executable_allocation(
+    allocation_scenario: AllocationScenario,
+    *,
+    offer_price: float | None,
+    max_subscription_capital_tl: float | None,
+) -> ExecutableAllocation | None:
+    """``None`` when there's no capital limit to apply, or when either
+    the theoretical share count or the offer price isn't resolved (see
+    ``AllocationScenario.status``) — never a guessed share count."""
+    if max_subscription_capital_tl is None:
+        return None
+    if allocation_scenario.status != "computed":
+        return None
+    theoretical_shares = allocation_scenario.base_integer_allocation
+    if theoretical_shares is None or offer_price is None or offer_price <= 0:
+        return None
+
+    affordable_shares = max(int(max_subscription_capital_tl // offer_price), 0)
+    shares = min(theoretical_shares, affordable_shares)
+    return ExecutableAllocation(
+        shares=shares,
+        capital_tl=shares * offer_price,
+        capital_constrained=shares < theoretical_shares,
+    )
 
 
 def build_allocation_economics(
     allocation_scenario: AllocationScenario,
     demand_label: str,
-    return_scenarios: Sequence[ReturnScenario],
+    stress_scenarios: Sequence[StressScenario],
+    *,
+    offer_price: float | None = None,
+    max_subscription_capital_tl: float | None = None,
 ) -> AllocationEconomics:
-    """Pure. ``return_outcomes`` is empty when ``allocation_scenario``
-    itself has no resolved TL baseline — never a guessed capital
-    figure (see ``AllocationScenario.tl_allocation_baseline``)."""
-    capital = allocation_scenario.tl_allocation_baseline
-    if capital is None:
-        return AllocationEconomics(
-            demand_label=demand_label,
-            allocation_scenario=allocation_scenario,
-            capital_tl=None,
-            capital_tl_range=None,
-            return_outcomes=(),
-        )
-    outcomes = tuple(ReturnOutcome(scenario=rs, profit_loss_tl=capital * rs.return_pct) for rs in return_scenarios)
+    """Pure. Stress P&L is priced on the *executable* capital when a
+    capital limit was supplied and resolvable, otherwise on the
+    theoretical baseline capital — never on money the caller does not
+    have (see module docstring)."""
+    theoretical_capital = allocation_scenario.tl_allocation_baseline
+    executable = _executable_allocation(
+        allocation_scenario, offer_price=offer_price, max_subscription_capital_tl=max_subscription_capital_tl
+    )
+
+    pl_basis = executable.capital_tl if executable is not None else theoretical_capital
+    stress_outcomes: tuple[StressOutcome, ...] = ()
+    if pl_basis is not None:
+        stress_outcomes = tuple(StressOutcome(scenario=s, profit_loss_tl=pl_basis * s.return_pct) for s in stress_scenarios)
+
     return AllocationEconomics(
         demand_label=demand_label,
         allocation_scenario=allocation_scenario,
-        capital_tl=capital,
-        capital_tl_range=allocation_scenario.tl_allocation_range,
-        return_outcomes=outcomes,
+        theoretical_capital_tl=theoretical_capital,
+        theoretical_capital_tl_range=allocation_scenario.tl_allocation_range,
+        executable=executable,
+        stress_outcomes=stress_outcomes,
     )
-
-
-def _personal_capital_notes(allocations: Sequence[AllocationEconomics], personal_capital: PersonalCapitalContext) -> tuple[str, ...]:
-    available = personal_capital.available_capital_tl
-    notes: list[str] = []
-    for allocation in allocations:
-        if allocation.capital_tl is None:
-            continue
-        if allocation.capital_tl > available:
-            notes.append(
-                f"{allocation.demand_label}: gereken sermaye (~{allocation.capital_tl:,.0f} TL) belirttiğiniz "
-                f"{available:,.0f} TL'yi aşıyor — bu senaryoda tahsisatın tamamını karşılayamayabilirsiniz.".replace(",", ".")
-            )
-        else:
-            share_pct = (allocation.capital_tl / available) * 100.0 if available > 0 else None
-            share_str = f"yaklaşık %{share_pct:.1f}'i" if share_pct is not None else "bilinmiyor"
-            notes.append(
-                f"{allocation.demand_label}: gereken sermaye belirttiğiniz sermayenin {share_str} "
-                f"(~{allocation.capital_tl:,.0f} TL / {available:,.0f} TL).".replace(",", ".")
-            )
-    return tuple(notes)
 
 
 def build_subscription_economics(
@@ -242,17 +307,18 @@ def build_subscription_economics(
     recent_ipo_outcomes: Sequence[IpoMarketOutcome],
     as_of: datetime,
     exclude_ticker: str | None,
-    personal_capital: PersonalCapitalContext | None = None,
+    offer_price: float | None = None,
+    subscription_capital_limit: SubscriptionCapitalLimit | None = None,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
 ) -> SubscriptionEconomics:
     """Pure — no I/O. ``allocation_scenarios`` is expected to be exactly
     what ``decision.subscription_v1`` already built (its own
     ``DEFAULT_ALLOCATION_SCENARIO_PARTICIPANT_COUNTS`` scenarios); this
     function never builds its own."""
-    return_scenarios, source = build_return_scenarios(
+    historical = build_historical_observation(
         recent_ipo_outcomes, as_of=as_of, exclude_ticker=exclude_ticker, lookback_days=lookback_days
     )
-    basis = return_scenarios[0].basis if return_scenarios else ""
+    stress_scenarios = build_stress_scenarios()
 
     if len(allocation_scenarios) == len(DEMAND_LABELS_ASCENDING):
         labels: Sequence[str] = DEMAND_LABELS_ASCENDING
@@ -262,17 +328,18 @@ def build_subscription_economics(
             for i, scenario in enumerate(allocation_scenarios)
         )
 
+    max_capital = subscription_capital_limit.max_subscription_capital_tl if subscription_capital_limit is not None else None
     allocations = tuple(
-        build_allocation_economics(scenario, label, return_scenarios) for scenario, label in zip(allocation_scenarios, labels)
+        build_allocation_economics(
+            scenario, label, stress_scenarios, offer_price=offer_price, max_subscription_capital_tl=max_capital
+        )
+        for scenario, label in zip(allocation_scenarios, labels)
     )
 
-    personal_notes = _personal_capital_notes(allocations, personal_capital) if personal_capital is not None else ()
-
     return SubscriptionEconomics(
-        return_scenario_source=source,
-        return_scenario_basis=basis,
+        historical_observation=historical,
+        stress_scenarios=stress_scenarios,
         allocations=allocations,
-        personal_capital_notes=personal_notes,
     )
 
 
@@ -280,43 +347,60 @@ def subscription_economics_as_dict(economics: SubscriptionEconomics) -> dict:
     from ..kap.allocation_scenario import allocation_scenario_as_dict
 
     return {
-        "return_scenario_source": economics.return_scenario_source,
-        "return_scenario_basis": economics.return_scenario_basis,
+        "historical_observation": {
+            "comparable_count": economics.historical_observation.comparable_count,
+            "observed_worst_pct": economics.historical_observation.observed_worst_pct,
+            "observed_median_pct": economics.historical_observation.observed_median_pct,
+            "observed_best_pct": economics.historical_observation.observed_best_pct,
+            "basis": economics.historical_observation.basis,
+        },
+        "stress_scenarios": [
+            {"label": s.label, "return_pct": s.return_pct, "basis": s.basis} for s in economics.stress_scenarios
+        ],
         "allocations": [
             {
                 "demand_label": allocation.demand_label,
                 "allocation_scenario": allocation_scenario_as_dict(allocation.allocation_scenario),
-                "capital_tl": allocation.capital_tl,
-                "capital_tl_range": list(allocation.capital_tl_range) if allocation.capital_tl_range else None,
-                "return_outcomes": [
+                "theoretical_capital_tl": allocation.theoretical_capital_tl,
+                "theoretical_capital_tl_range": list(allocation.theoretical_capital_tl_range)
+                if allocation.theoretical_capital_tl_range
+                else None,
+                "executable": {
+                    "shares": allocation.executable.shares,
+                    "capital_tl": allocation.executable.capital_tl,
+                    "capital_constrained": allocation.executable.capital_constrained,
+                }
+                if allocation.executable is not None
+                else None,
+                "stress_outcomes": [
                     {
                         "label": outcome.scenario.label,
                         "return_pct": outcome.scenario.return_pct,
-                        "source": outcome.scenario.source,
                         "profit_loss_tl": outcome.profit_loss_tl,
                     }
-                    for outcome in allocation.return_outcomes
+                    for outcome in allocation.stress_outcomes
                 ],
             }
             for allocation in economics.allocations
         ],
-        "personal_capital_notes": list(economics.personal_capital_notes),
         "version": economics.version,
     }
 
 
 __all__ = [
     "DEMAND_LABELS_ASCENDING",
-    "ILLUSTRATIVE_RETURN_SCENARIOS",
+    "STRESS_RETURN_SCENARIOS",
     "SUBSCRIPTION_ECONOMICS_VERSION",
     "AllocationEconomics",
-    "PersonalCapitalContext",
-    "ReturnOutcome",
-    "ReturnScenario",
-    "ReturnScenarioSource",
+    "ExecutableAllocation",
+    "HistoricalObservation",
+    "StressOutcome",
+    "StressScenario",
+    "SubscriptionCapitalLimit",
     "SubscriptionEconomics",
     "build_allocation_economics",
-    "build_return_scenarios",
+    "build_historical_observation",
+    "build_stress_scenarios",
     "build_subscription_economics",
     "subscription_economics_as_dict",
 ]

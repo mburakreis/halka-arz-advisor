@@ -31,7 +31,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from halka_arz_advisor.decision.pipeline import resolve_company_identity  # noqa: E402
-from halka_arz_advisor.decision.subscription_economics import PersonalCapitalContext  # noqa: E402
+from halka_arz_advisor.decision.subscription_economics import SubscriptionCapitalLimit  # noqa: E402
 from halka_arz_advisor.decision.subscription_v1 import SubscriptionDecisionInputs, evaluate_subscription_decision  # noqa: E402
 from halka_arz_advisor.evds.cache import EvdsCache  # noqa: E402
 from halka_arz_advisor.evds.features import build_market_context_snapshot  # noqa: E402
@@ -92,10 +92,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--confirmed-by", default="operator", help="Who to attribute --confirm values to")
     parser.add_argument("--send", action="store_true", help="Actually send the card via Telegram (default: print only)")
     parser.add_argument(
-        "--available-capital-tl", type=float, default=None,
-        help="Optional: your available capital in TL, to annotate whether each allocation scenario's required "
-        "capital is economically meaningful for you (never stored, never a portfolio — a single per-run number). "
-        "Can also be set via the AVAILABLE_CAPITAL_TL environment variable / .env.",
+        "--max-subscription-capital-tl", type=float, default=None,
+        help="Optional: the maximum TL you're willing/able to commit to *this* subscription (never total wealth, "
+        "never a portfolio — a single per-run number). Used to compute each demand scenario's actually-executable "
+        "whole-share allocation and TL exposure, not just the theoretical one. Can also be set via the "
+        "MAX_SUBSCRIPTION_CAPITAL_TL environment variable / .env.",
     )
     parser.add_argument(
         "--as-of", type=lambda s: date.fromisoformat(s), default=None,
@@ -218,16 +219,18 @@ def main(argv: list[str] | None = None) -> int:
     company_disclosures = [d for d in processed if d.matched_spk_record_id == record_id]
     as_of = datetime.combine(args.as_of, datetime.min.time()) if args.as_of else datetime.now(UTC)
 
-    available_capital_tl = args.available_capital_tl
-    if available_capital_tl is None and os.environ.get("AVAILABLE_CAPITAL_TL", "").strip():
-        available_capital_tl = float(os.environ["AVAILABLE_CAPITAL_TL"])
-    personal_capital = PersonalCapitalContext(available_capital_tl) if available_capital_tl is not None else None
+    max_subscription_capital_tl = args.max_subscription_capital_tl
+    if max_subscription_capital_tl is None and os.environ.get("MAX_SUBSCRIPTION_CAPITAL_TL", "").strip():
+        max_subscription_capital_tl = float(os.environ["MAX_SUBSCRIPTION_CAPITAL_TL"])
+    subscription_capital_limit = (
+        SubscriptionCapitalLimit(max_subscription_capital_tl) if max_subscription_capital_tl is not None else None
+    )
 
     inputs = SubscriptionDecisionInputs(
         offering_terms=offering_terms, completed_terms=completed_terms, derived_financials=derived_financials,
         valuation_evidence=valuation_evidence, market_context=market_context, as_of=as_of, ticker=ticker,
         recent_ipo_outcomes=recent_ipo_outcomes, disclosures=tuple(company_disclosures),
-        personal_capital=personal_capital,
+        subscription_capital_limit=subscription_capital_limit,
     )
     decision = evaluate_subscription_decision(inputs)
 

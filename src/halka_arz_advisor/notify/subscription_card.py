@@ -19,7 +19,12 @@ the system genuinely doesn't know enough yet.
 
 from __future__ import annotations
 
-from ..decision.subscription_economics import AllocationEconomics, DEMAND_LABELS_ASCENDING, SubscriptionEconomics
+from ..decision.subscription_economics import (
+    AllocationEconomics,
+    DEMAND_LABELS_ASCENDING,
+    HistoricalObservation,
+    SubscriptionEconomics,
+)
 from ..decision.subscription_v1 import SubscriptionDecisionV1
 from ..evds.models import MarketContextSnapshot
 from ..kap.manual_confirmation import CompletedOfferingTerms, effective_offering_terms
@@ -141,33 +146,91 @@ def _format_retail_tranche(terms: OfferingTerms) -> str:
 
 
 def _format_allocation_line(allocation: AllocationEconomics) -> str:
+    """Theoretical allocation first, then — only when a subscription
+    capital limit was supplied — what could actually be funded under
+    it. Never blends the two into one number (see
+    decision.subscription_economics's own module docstring)."""
     scenario = allocation.allocation_scenario
     count_str = f"{scenario.hypothetical_retail_participant_count:,}".replace(",", ".")
     if scenario.status != "computed":
         return f"  • {allocation.demand_label} ({count_str} katılımcı varsayımı): hesaplanamıyor"
+
     base = scenario.base_integer_allocation
     range_shares = scenario.allocation_range_shares
     range_str = f"{range_shares[0]}-{range_shares[1]} pay" if range_shares and range_shares[0] != range_shares[1] else f"{base} pay"
     tl_str = ""
-    if allocation.capital_tl_range is not None:
-        low, high = allocation.capital_tl_range
+    if allocation.theoretical_capital_tl_range is not None:
+        low, high = allocation.theoretical_capital_tl_range
         tl_str = f" (~{low:,.0f}-{high:,.0f} TL)".replace(",", ".") if low != high else f" (~{low:,.0f} TL)".replace(",", ".")
-    return f"  • {allocation.demand_label} ({count_str} katılımcı varsayımı): {range_str}{tl_str}"
+    line = f"  • {allocation.demand_label} ({count_str} katılımcı varsayımı): teorik {range_str}{tl_str}"
+
+    executable = allocation.executable
+    if executable is not None:
+        capital_str = f"{executable.capital_tl:,.0f}".replace(",", ".")
+        constraint_note = "sermaye ile sınırlı" if executable.capital_constrained else "sermayeniz yeterli"
+        line += f" — uygulanabilir: {executable.shares} pay (~{capital_str} TL, {constraint_note})"
+
+    return line
+
+
+def _format_historical_observation(historical: HistoricalObservation) -> list[str]:
+    lines = [
+        "",
+        "Yakın dönem karşılaştırılabilir halka arzlar (gerçekleşmiş sonuçlar — bu halka arzın kendi getirisinin "
+        "tahmini ya da alt/üst sınırı değildir):",
+        f"  • Karşılaştırma sayısı: {historical.comparable_count}",
+    ]
+    if historical.comparable_count == 0:
+        return lines
+    lines.append(f"  • Gözlenen en düşük: %{historical.observed_worst_pct * 100:+.1f}")  # type: ignore[operator]
+    lines.append(f"  • Medyan: %{historical.observed_median_pct * 100:+.1f}")  # type: ignore[operator]
+    lines.append(f"  • Gözlenen en yüksek: %{historical.observed_best_pct * 100:+.1f}")  # type: ignore[operator]
+    return lines
 
 
 def _pick_pl_anchor(allocations: tuple[AllocationEconomics, ...]) -> AllocationEconomics | None:
     """Which single allocation scenario's own capital anchors the
-    compact profit/loss list below — the middle ("typical demand")
-    scenario when the usual three demand labels are present, else the
-    first scenario with a resolved capital figure. Never an average
-    across scenarios: each demand scenario's own capital is a distinct,
-    self-consistent baseline (see kap.allocation_scenario), not
-    something to blend."""
+    compact stress profit/loss list below — the middle ("typical
+    demand") scenario when the usual three demand labels are present,
+    else the first scenario with a resolved stress outcome. Never an
+    average across scenarios: each demand scenario's own capital is a
+    distinct, self-consistent baseline, not something to blend."""
     typical_label = DEMAND_LABELS_ASCENDING[1]
     for allocation in allocations:
-        if allocation.demand_label == typical_label and allocation.capital_tl is not None:
+        if allocation.demand_label == typical_label and allocation.stress_outcomes:
             return allocation
-    return next((a for a in allocations if a.capital_tl is not None), None)
+    return next((a for a in allocations if a.stress_outcomes), None)
+
+
+def _format_stress_section(economics: SubscriptionEconomics) -> list[str]:
+    anchor = _pick_pl_anchor(economics.allocations)
+    if anchor is None or not anchor.stress_outcomes:
+        return []
+
+    if anchor.executable is not None:
+        basis_capital = anchor.executable.capital_tl
+        basis_label = "uygulanabilir sermayesi"
+    else:
+        basis_capital = anchor.theoretical_capital_tl
+        basis_label = "teorik sermayesi"
+    capital_str = f"{basis_capital:,.0f}".replace(",", ".")  # type: ignore[arg-type]
+
+    lines = [
+        "",
+        f"Stres senaryosu (gösterge — istatistiksel bir tahmin ya da VaR hesabı değildir; {anchor.demand_label} "
+        f"{basis_label} ~{capital_str} TL üzerinden):",
+    ]
+    for outcome in anchor.stress_outcomes:
+        pct = outcome.scenario.return_pct * 100.0
+        pl = outcome.profit_loss_tl
+        lines.append(f"  • {outcome.scenario.label} (%{pct:+.1f}): {pl:+,.0f} TL".replace(",", "."))
+    if len(economics.allocations) > 1:
+        capital_kind = "uygulanabilir" if anchor.executable is not None else "teorik"
+        lines.append(
+            f"  • Diğer talep senaryolarında kâr/zarar, o senaryonun kendi {capital_kind} sermayesiyle orantılı "
+            "olarak değişir."
+        )
+    return lines
 
 
 def _format_subscription_economics(economics: SubscriptionEconomics) -> list[str]:
@@ -178,30 +241,8 @@ def _format_subscription_economics(economics: SubscriptionEconomics) -> list[str
     for allocation in economics.allocations:
         lines.append(_format_allocation_line(allocation))
 
-    anchor = _pick_pl_anchor(economics.allocations)
-    if anchor is not None and anchor.return_outcomes:
-        source_label = (
-            "yakın dönem halka arzların gerçek 5 günlük getirileri"
-            if economics.return_scenario_source == "historical_regime"
-            else "gösterge senaryolar, bir tahmin değildir"
-        )
-        capital_str = f"{anchor.capital_tl:,.0f}".replace(",", ".")
-        lines.append("")
-        lines.append(f"Olası kâr/zarar ({anchor.demand_label} sermayesi ~{capital_str} TL üzerinden, {source_label}):")
-        for outcome in anchor.return_outcomes:
-            pct = outcome.scenario.return_pct * 100.0
-            pl = outcome.profit_loss_tl
-            lines.append(f"  • {outcome.scenario.label} (%{pct:+.1f}): {pl:+,.0f} TL".replace(",", "."))
-        if len(economics.allocations) > 1:
-            lines.append(
-                "  • Diğer talep senaryolarında kâr/zarar, o senaryonun kendi sermayesiyle orantılı olarak değişir."
-            )
-
-    if economics.personal_capital_notes:
-        lines.append("")
-        lines.append("Kişisel sermaye bağlamı:")
-        for note in economics.personal_capital_notes:
-            lines.append(f"  • {note}")
+    lines.extend(_format_historical_observation(economics.historical_observation))
+    lines.extend(_format_stress_section(economics))
 
     return lines
 

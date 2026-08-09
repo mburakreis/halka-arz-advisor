@@ -73,18 +73,29 @@ cheap/expensive verdict, and neither does ``kap.valuation``.
 **r4 (2026-08-09): added TL-denominated subscription economics**
 (:mod:`halka_arz_advisor.decision.subscription_economics`) — for each of
 this module's own ``allocation_scenarios``, roughly how much capital
-that demand scenario would actually require and what a handful of
-plausible post-listing return scenarios would mean in TL. Grounded in
-real, other-IPOs' actual 5-day returns (the same leakage-safe
-``ipo_outcomes.regime`` selection ``subscription_edge`` already reads)
-when there's a defensible sample, otherwise a small, clearly labeled
-illustrative band — never a new expected-return forecast. This is pure
-downstream arithmetic with no verdict of its own: it never feeds
+that demand scenario would actually require. This is pure downstream
+arithmetic with no verdict of its own: it never feeds
 ``action``/``subscription_edge``/``mechanics_state``, exactly like
-``allocation_scenarios`` before it. ``personal_capital`` is a new,
-optional single-number input (never a portfolio) purely to annotate
-whether a scenario's required capital is economically meaningful for
-the caller.
+``allocation_scenarios`` before it.
+
+**r5 (2026-08-09): made subscription economics operationally honest for
+real-money use.** r4 read a small recent-IPO cohort's own worst/median/
+best actual return as if it were this IPO's own plausible loss range —
+if every recent comparable happened to be positive, "worst case" read
+as a positive number, which is not a downside scenario at all. This
+version keeps the real cohort statistics (still real, still useful) but
+reports them purely as ``HistoricalObservation`` — historical fact,
+never priced into a TL figure and never called a "scenario". A separate,
+fixed ``StressScenario`` (never derived from the cohort) is what's
+actually priced into TL. It also replaces the old
+``PersonalCapitalContext``/``personal_capital_notes`` (which only
+flagged that a scenario "exceeds" the caller's capital) with
+``SubscriptionCapitalLimit``/``max_subscription_capital_tl`` and a real
+``ExecutableAllocation`` per scenario — the whole-share count and TL
+exposure actually fundable, capped at the scenario's own theoretical
+allocation, never a fractional share. Every TL profit/loss is now
+priced on that executable capital when a limit is supplied, never on
+capital the caller doesn't have.
 
 **Gates, not points** (unchanged in spirit from r1). Every rule below is
 a pass/fail gate evaluated in a fixed order; nothing here sums or
@@ -109,9 +120,9 @@ from ..kap.models import KapDisclosure
 from ..kap.offering_terms import OfferingTerms
 from ..kap.text import fold_turkish
 from ..kap.valuation import ValuationEvidence
-from .subscription_economics import PersonalCapitalContext, SubscriptionEconomics, build_subscription_economics
+from .subscription_economics import SubscriptionCapitalLimit, SubscriptionEconomics, build_subscription_economics
 
-RULE_VERSION = "subscription_v1_r4"
+RULE_VERSION = "subscription_v1_r5"
 
 SubscriptionAction = Literal[
     "SUBSCRIBE_FOR_LISTING_TRADE",
@@ -214,10 +225,10 @@ class SubscriptionDecisionInputs:
     # structural rather than a caller obligation.
     recent_ipo_outcomes: tuple[IpoMarketOutcome, ...] = ()
     disclosures: tuple[KapDisclosure, ...] = ()
-    # Optional, investor-level (never per-position/portfolio) capital
-    # figure — see subscription_economics.PersonalCapitalContext's own
-    # docstring for why this stays a single number.
-    personal_capital: PersonalCapitalContext | None = None
+    # Optional cap on what the caller is willing/able to commit to
+    # *this* subscription (never total wealth, never a portfolio) — see
+    # subscription_economics.SubscriptionCapitalLimit's own docstring.
+    subscription_capital_limit: SubscriptionCapitalLimit | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,12 +478,14 @@ def evaluate_subscription_decision(inputs: SubscriptionDecisionInputs) -> Subscr
     scenarios = tuple(
         build_allocation_scenario(effective_terms, count) for count in DEFAULT_ALLOCATION_SCENARIO_PARTICIPANT_COUNTS
     )
+    offer_price_field = effective_terms.offer_price
     economics = build_subscription_economics(
         scenarios,
         recent_ipo_outcomes=inputs.recent_ipo_outcomes,
         as_of=inputs.as_of,
         exclude_ticker=inputs.ticker,
-        personal_capital=inputs.personal_capital,
+        offer_price=offer_price_field.value if offer_price_field.status == "extracted" else None,
+        subscription_capital_limit=inputs.subscription_capital_limit,
     )
 
     watchworthy = ownership_view in ("HOLD_CANDIDATE", "WATCH")
@@ -593,9 +606,9 @@ __all__ = [
     "MechanicsState",
     "OwnershipView",
     # Re-exported for convenience: callers building SubscriptionDecisionInputs
-    # need this to populate its optional personal_capital field, and it's
-    # otherwise defined in the sibling subscription_economics module.
-    "PersonalCapitalContext",
+    # need this to populate its optional subscription_capital_limit field,
+    # and it's otherwise defined in the sibling subscription_economics module.
+    "SubscriptionCapitalLimit",
     "SubscriptionAction",
     "SubscriptionDecisionInputs",
     "SubscriptionDecisionV1",

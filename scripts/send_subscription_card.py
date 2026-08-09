@@ -162,26 +162,38 @@ def main(argv: list[str] | None = None) -> int:
     matched = [match_disclosure(d, ipo_records=ipo_records, application_records=application_records) for d in target_disclosures]
     matched = [d for d in matched if d.match_method != "unmatched"]
 
+    if not matched:
+        print(f"No matched SPK record for ticker {args.ticker!r}.", file=sys.stderr)
+        return 1
+
     pdf_cache = PdfCache(args.pdf_cache_dir)
     ocr_cache = OcrCache(args.ocr_cache_dir)
     processed = [
         process_disclosure_documents(d, config=config, cache=pdf_cache, cache_only=True, ocr_scanned=True, ocr_cache=ocr_cache)
         for d in matched
     ]
+    # record_id is resolved here, from the ticker-matched disclosures
+    # only — never from the post-merge list below. merge_backfilled_disclosures
+    # unions in backfilled disclosures for *every* company named by
+    # ipo_records/application_records (by design — see its own
+    # docstring — for callers like analyze_pending_ipos.py that process
+    # the full pending universe), not just this ticker's. Resolving
+    # record_id after that merge previously meant an entirely
+    # unmatched ticker (empty `matched`) still produced a non-empty
+    # `processed` list — filled with some *other*, unrelated company's
+    # cached data — and `next(...)` silently picked that company's
+    # record_id instead of failing, producing a real card for the
+    # wrong company with no indication anything was wrong.
+    record_id = next((d.matched_spk_record_id for d in processed if d.matched_spk_record_id), None)
+    if record_id is None:
+        print(f"No matched SPK record for ticker {args.ticker!r}.", file=sys.stderr)
+        return 1
+
     processed = merge_backfilled_disclosures(
         processed, ipo_records=ipo_records, application_records=application_records,
         backfill_cache=BackfillCache(args.backfill_cache_dir), pdf_cache=pdf_cache, config=config,
         ocr_scanned=True, ocr_cache=ocr_cache,
     )
-
-    if not processed:
-        print(f"No cached, matched disclosures found for ticker {args.ticker!r}.", file=sys.stderr)
-        return 1
-
-    record_id = next((d.matched_spk_record_id for d in processed if d.matched_spk_record_id), None)
-    if record_id is None:
-        print(f"No matched SPK record for ticker {args.ticker!r}.", file=sys.stderr)
-        return 1
 
     company_name, ticker = resolve_company_identity(record_id, processed, ipo_records=ipo_records, application_records=application_records)
 
